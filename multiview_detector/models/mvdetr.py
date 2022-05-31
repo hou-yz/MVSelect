@@ -4,13 +4,10 @@ import torch
 import torch.nn as nn
 from torchvision.models import vgg11
 import torchvision.transforms as T
-import kornia
+from kornia.geometry import warp_perspective
 from multiview_detector.models.resnet import resnet18
 from multiview_detector.utils.image_utils import img_color_denormalize, array2heatmap
 from multiview_detector.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
-from multiview_detector.models.conv_world_feat import ConvWorldFeat, DeformConvWorldFeat
-from multiview_detector.models.trans_world_feat import TransformerWorldFeat, DeformTransWorldFeat, \
-    DeformTransWorldFeat_aio
 import matplotlib.pyplot as plt
 
 
@@ -30,50 +27,54 @@ def output_head(in_dim, feat_dim, out_dim):
     return fc
 
 
-def create_reference_map(dataset, n_points=4, downsample=2, visualize=False):
-    H, W = dataset.Rworld_shape  # H,W; N_row,N_col
-    H, W = H // downsample, W // downsample
-    ref_y, ref_x = torch.meshgrid(torch.linspace(0.5, H - 0.5, H, dtype=torch.float32),
-                                  torch.linspace(0.5, W - 0.5, W, dtype=torch.float32))
-    ref = torch.stack((ref_x, ref_y), -1).reshape([-1, 2])
-    if n_points == 4:
-        zs = [0, 0, 0, 0]
-    elif n_points == 8:
-        zs = [-0.4, -0.2, 0, 0, 0.2, 0.4, 1, 1.8]
-    else:
-        raise Exception
-    ref_maps = torch.zeros([H * W, dataset.num_cam, n_points, 2])
-    world_zoom_mat = np.diag([dataset.world_reduce * downsample, dataset.world_reduce * downsample, 1])
-    Rworldgrid_from_worldcoord_mat = np.linalg.inv(
-        dataset.base.worldcoord_from_worldgrid_mat @ world_zoom_mat @ dataset.base.world_indexing_from_xy_mat)
-    for cam in range(dataset.num_cam):
-        mat_0 = Rworldgrid_from_worldcoord_mat @ get_worldcoord_from_imgcoord_mat(dataset.base.intrinsic_matrices[cam],
-                                                                                  dataset.base.extrinsic_matrices[cam])
-        for i, z in enumerate(zs):
-            mat_z = Rworldgrid_from_worldcoord_mat @ get_worldcoord_from_imgcoord_mat(
-                dataset.base.intrinsic_matrices[cam],
-                dataset.base.extrinsic_matrices[cam],
-                z / dataset.base.worldcoord_unit)
-            img_pts = project_2d_points(np.linalg.inv(mat_z), ref)
-            ref_maps[:, cam, i, :] = torch.from_numpy(project_2d_points(mat_0, img_pts))
-        pass
-        if visualize:
-            fig, ax = plt.subplots()
-            field_x = (ref_maps[:, cam, 3, 0] - ref_maps[:, cam, 1, 0]).reshape([H, W])
-            field_y = (ref_maps[:, cam, 3, 1] - ref_maps[:, cam, 1, 1]).reshape([H, W])
-            ax.streamplot(ref_x.numpy(), ref_y.numpy(), field_x.numpy(), field_y.numpy())
-            ax.set_aspect('equal', 'box')
-            ax.invert_yaxis()
-            plt.show()
-
-    ref_maps[:, :, :, 0] /= W
-    ref_maps[:, :, :, 1] /= H
-    return ref_maps
+def create_coord_map(img_size, with_r=False):
+    H, W = img_size
+    grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
+    grid_x = torch.from_numpy(grid_x / (W - 1) * 2 - 1).float()
+    grid_y = torch.from_numpy(grid_y / (H - 1) * 2 - 1).float()
+    ret = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0)
+    if with_r:
+        grid_r = torch.sqrt(torch.pow(grid_x, 2) + torch.pow(grid_y, 2)).view([1, 1, H, W])
+        ret = torch.cat([ret, grid_r], dim=1)
+    return ret
 
 
-class MVDeTr(nn.Module):
-    def __init__(self, dataset, arch='resnet18', z=0, world_feat_arch='conv',
-                 bottleneck_dim=128, outfeat_dim=64, droupout=0.5):
+class ConvWorldFeat(nn.Module):
+    def __init__(self, num_cam, Rworld_shape, base_dim, hidden_dim=128, stride=2, reduction='avg'):
+        super(ConvWorldFeat, self).__init__()
+        self.downsample = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, stride, 1), nn.ReLU(), )
+        self.coord_map = create_coord_map(np.array(Rworld_shape) // stride)
+        self.reduction = reduction
+        if self.reduction is None:
+            combined_input_dim = base_dim * num_cam + 2
+        elif self.reduction == 'avg':
+            combined_input_dim = base_dim + 2
+        else:
+            raise Exception
+        self.world_feat = nn.Sequential(nn.Conv2d(combined_input_dim, hidden_dim, 3, padding=1), nn.ReLU(),
+                                        nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
+                                        nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
+        self.upsample = nn.Sequential(nn.Upsample(Rworld_shape, mode='bilinear', align_corners=False),
+                                      nn.Conv2d(hidden_dim, base_dim, 3, 1, 1), nn.ReLU(), )
+
+    def forward(self, x, visualize=False):
+        B, N, C, H, W = x.shape
+        x = self.downsample(x.view(B * N, C, H, W))
+        _, _, H, W = x.shape
+        if self.reduction is None:
+            x = x.view(B, N * C, H, W)
+        elif self.reduction == 'avg':
+            x = x.view(B, N, C, H, W).mean(dim=1)
+        else:
+            raise Exception
+        x = torch.cat([x, self.coord_map.repeat([B, 1, 1, 1]).to(x.device)], 1)
+        x = self.world_feat(x)
+        x = self.upsample(x)
+        return x
+
+
+class MVDet(nn.Module):
+    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, outfeat_dim=64, droupout=0.5):
         super().__init__()
         self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.img_reduce = dataset.img_reduce
@@ -94,12 +95,7 @@ class MVDeTr(nn.Module):
                                                        worldcoord_from_imgcoord_mats[cam])
                                       for cam in range(dataset.num_cam)])
 
-        if arch == 'vgg11':
-            self.base = vgg11(pretrained=True).features
-            self.base[-1] = nn.Identity()
-            self.base[-4] = nn.Identity()
-            base_dim = 512
-        elif arch == 'resnet18':
+        if arch == 'resnet18':
             self.base = nn.Sequential(*list(resnet18(pretrained=True,
                                                      replace_stride_with_dilation=[False, True, True]).children())[:-2])
             base_dim = 512
@@ -119,21 +115,7 @@ class MVDeTr(nn.Module):
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        if world_feat_arch == 'conv':
-            self.world_feat = ConvWorldFeat(dataset.num_cam, dataset.Rworld_shape, base_dim)
-        elif world_feat_arch == 'trans':
-            self.world_feat = TransformerWorldFeat(dataset.num_cam, dataset.Rworld_shape, base_dim)
-        elif world_feat_arch == 'deform_conv':
-            self.world_feat = DeformConvWorldFeat(dataset.num_cam, dataset.Rworld_shape, base_dim)
-        elif world_feat_arch == 'deform_trans':
-            n_points = 4
-            reference_points = create_reference_map(dataset, n_points).repeat([dataset.num_cam, 1, 1, 1])
-            self.world_feat = DeformTransWorldFeat(dataset.num_cam, dataset.Rworld_shape, base_dim,
-                                                   n_points=n_points, stride=2, reference_points=reference_points)
-        elif world_feat_arch == 'aio':
-            self.world_feat = DeformTransWorldFeat_aio(dataset.num_cam, dataset.Rworld_shape, base_dim)
-        else:
-            raise Exception
+        self.world_feat = ConvWorldFeat(dataset.num_cam, dataset.Rworld_shape, base_dim)
 
         # world heads
         self.world_heatmap = output_head(base_dim, outfeat_dim, 1)
@@ -162,8 +144,8 @@ class MVDeTr(nn.Module):
 
         if visualize:
             denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-            proj_imgs = kornia.warp_perspective(T.Resize(self.Rimg_shape)(imgs), proj_mats.to(imgs.device),
-                                                self.Rworld_shape, align_corners=False). \
+            proj_imgs = warp_perspective(T.Resize(self.Rimg_shape)(imgs), proj_mats.to(imgs.device),
+                                         self.Rworld_shape, align_corners=False). \
                 view(B, N, 3, self.Rworld_shape[0], self.Rworld_shape[1])
             for cam in range(N):
                 visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
@@ -191,8 +173,8 @@ class MVDeTr(nn.Module):
 
         # world feat
         H, W = self.Rworld_shape
-        world_feat = kornia.warp_perspective(imgs_feat, proj_mats.to(imgs.device),
-                                             self.Rworld_shape, align_corners=False).view(B, N, C, H, W)
+        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device),
+                                      self.Rworld_shape, align_corners=False).view(B, N, C, H, W)
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(world_feat[0, cam].detach(), dim=0).cpu())
@@ -226,9 +208,8 @@ def test():
     from multiview_detector.utils.decode import ctdet_decode
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=False, augmentation=False)
-    create_reference_map(dataset, 4)
     dataloader = DataLoader(dataset, 1, False, num_workers=0)
-    model = MVDeTr(dataset, world_feat_arch='deform_trans').cuda()
+    model = MVDet(dataset).cuda()
     # model.load_state_dict(torch.load(
     #     '../../logs/wildtrack/augFCS_deform_trans_lr0.001_baseR0.1_neck128_out64_alpha1.0_id0_drop0.5_dropcam0.0_worldRK4_10_imgRK12_10_2021-04-09_22-39-28/MultiviewDetector.pth'))
     imgs, world_gt, imgs_gt, affine_mats, frame = next(iter(dataloader))
