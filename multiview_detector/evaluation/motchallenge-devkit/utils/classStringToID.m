@@ -1,1 +1,0 @@
-find(strcmp(labels,'occluder'))
