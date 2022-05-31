@@ -14,7 +14,7 @@ from torch.cuda.amp import GradScaler
 from torch import optim
 from torch.utils.data import DataLoader
 from multiview_detector.datasets import *
-from multiview_detector.models.mvdetr import MVDeTr
+from multiview_detector.models.mvdet import MVDet
 from multiview_detector.utils.logger import Logger
 from multiview_detector.utils.draw_curve import draw_curve
 from multiview_detector.utils.str2bool import str2bool
@@ -74,8 +74,8 @@ def main(args):
 
     # logging
     if args.resume is None:
-        logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}{"SS_" if args.semi_supervised else ""}' \
-                 f'{"aug_" if args.augmentation else ""}{args.world_feat}_lr{args.lr}_baseR{args.base_lr_ratio}_' \
+        logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}' \
+                 f'{"aug_" if args.augmentation else ""}_lr{args.lr}_baseR{args.base_lr_ratio}_' \
                  f'neck{args.bottleneck_dim}_out{args.outfeat_dim}_' \
                  f'alpha{args.alpha}_id{args.id_ratio}_drop{args.dropout}_dropcam{args.dropcam}_' \
                  f'worldRK{args.world_reduce}_{args.world_kernel_size}_imgRK{args.img_reduce}_{args.img_kernel_size}_' \
@@ -94,8 +94,8 @@ def main(args):
     print(vars(args))
 
     # model
-    model = MVDeTr(train_set, args.arch, world_feat_arch=args.world_feat,
-                   bottleneck_dim=args.bottleneck_dim, outfeat_dim=args.outfeat_dim, droupout=args.dropout).cuda()
+    model = MVDet(train_set, args.arch, bottleneck_dim=args.bottleneck_dim, outfeat_dim=args.outfeat_dim,
+                  droupout=args.dropout).cuda()
 
     param_dicts = [{"params": [p for n, p in model.named_parameters() if 'base' not in n and p.requires_grad], },
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
@@ -172,8 +172,6 @@ if __name__ == '__main__':
     parser.add_argument('--deterministic', type=str2bool, default=False)
     parser.add_argument('--augmentation', type=str2bool, default=True)
 
-    parser.add_argument('--world_feat', type=str, default='deform_trans',
-                        choices=['conv', 'trans', 'deform_conv', 'deform_trans', 'aio'])
     parser.add_argument('--bottleneck_dim', type=int, default=128)
     parser.add_argument('--outfeat_dim', type=int, default=0)
     parser.add_argument('--world_reduce', type=int, default=4)
