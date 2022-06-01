@@ -39,42 +39,8 @@ def create_coord_map(img_size, with_r=False):
     return ret
 
 
-class ConvWorldFeat(nn.Module):
-    def __init__(self, num_cam, Rworld_shape, base_dim, hidden_dim=128, stride=2, reduction='avg'):
-        super(ConvWorldFeat, self).__init__()
-        self.downsample = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, stride, 1), nn.ReLU(), )
-        self.coord_map = create_coord_map(np.array(Rworld_shape) // stride)
-        self.reduction = reduction
-        if self.reduction is None:
-            combined_input_dim = base_dim * num_cam + 2
-        elif self.reduction == 'avg':
-            combined_input_dim = base_dim + 2
-        else:
-            raise Exception
-        self.world_feat = nn.Sequential(nn.Conv2d(combined_input_dim, hidden_dim, 3, padding=1), nn.ReLU(),
-                                        nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
-                                        nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
-        self.upsample = nn.Sequential(nn.Upsample(Rworld_shape, mode='bilinear', align_corners=False),
-                                      nn.Conv2d(hidden_dim, base_dim, 3, 1, 1), nn.ReLU(), )
-
-    def forward(self, x, visualize=False):
-        B, N, C, H, W = x.shape
-        x = self.downsample(x.view(B * N, C, H, W))
-        _, _, H, W = x.shape
-        if self.reduction is None:
-            x = x.view(B, N * C, H, W)
-        elif self.reduction == 'avg':
-            x = x.view(B, N, C, H, W).mean(dim=1)
-        else:
-            raise Exception
-        x = torch.cat([x, self.coord_map.repeat([B, 1, 1, 1]).to(x.device)], 1)
-        x = self.world_feat(x)
-        x = self.upsample(x)
-        return x
-
-
 class MVDet(nn.Module):
-    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, outfeat_dim=64, droupout=0.5):
+    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, hidden_dim=128, outfeat_dim=64, droupout=0.5):
         super().__init__()
         self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.img_reduce = dataset.img_reduce
@@ -115,7 +81,15 @@ class MVDet(nn.Module):
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        self.world_feat = ConvWorldFeat(dataset.num_cam, dataset.Rworld_shape, base_dim)
+        downsample_stride = 2
+        self.downsample = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, downsample_stride, 1), nn.ReLU(), )
+        self.coord_map = create_coord_map(np.array(dataset.Rworld_shape) // downsample_stride)
+        combined_input_dim = base_dim + 2
+        self.world_feat = nn.Sequential(nn.Conv2d(combined_input_dim, hidden_dim, 3, padding=1), nn.ReLU(),
+                                        nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
+                                        nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
+        self.upsample = nn.Sequential(nn.Upsample(dataset.Rworld_shape, mode='bilinear', align_corners=False),
+                                      nn.Conv2d(hidden_dim, base_dim, 3, 1, 1), nn.ReLU(), )
 
         # world heads
         self.world_heatmap = output_head(base_dim, outfeat_dim, 1)
@@ -181,7 +155,13 @@ class MVDet(nn.Module):
                 visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
-        world_feat = self.world_feat(world_feat, visualize=visualize)
+
+        world_feat = self.downsample(world_feat.view(B * N, C, H, W))
+        _, _, h, w = world_feat.shape
+        world_feat = world_feat.view(B, N, C, h, w).mean(dim=1)
+        world_feat = torch.cat([world_feat, self.coord_map.repeat([B, 1, 1, 1]).to(world_feat.device)], 1)
+        world_feat = self.world_feat(world_feat)
+        world_feat = self.upsample(world_feat)
 
         # world heads
         world_heatmap = self.world_heatmap(world_feat)
