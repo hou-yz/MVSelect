@@ -2,7 +2,6 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-from torchvision.models import vgg11
 import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from multiview_detector.models.resnet import resnet18
@@ -91,6 +90,11 @@ class MVDet(nn.Module):
         self.upsample = nn.Sequential(nn.Upsample(dataset.Rworld_shape, mode='bilinear', align_corners=False),
                                       nn.Conv2d(hidden_dim, base_dim, 3, 1, 1), nn.ReLU(), )
 
+        # select camera based on initialization
+        self.pred_cam = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)),
+                                      nn.Conv2d(hidden_dim, hidden_dim, 1), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, dataset.num_cam, 1), nn.Softmax2d())
+
         # world heads
         self.world_heatmap = output_head(base_dim, outfeat_dim, 1)
         self.world_offset = output_head(base_dim, outfeat_dim, 2)
@@ -104,8 +108,9 @@ class MVDet(nn.Module):
         fill_fc_weights(self.world_offset)
         pass
 
-    def forward(self, imgs, M, visualize=False):
+    def forward(self, imgs, M, init_cam=None, visualize=False):
         B, N, C, H, W = imgs.shape
+        # B = init_cam.shape
         imgs = imgs.view(B * N, C, H, W)
 
         inverse_affine_mats = torch.inverse(M.view([B * N, 3, 3]))
@@ -158,7 +163,23 @@ class MVDet(nn.Module):
 
         world_feat = self.downsample(world_feat.view(B * N, C, H, W))
         _, _, h, w = world_feat.shape
-        world_feat = world_feat.view(B, N, C, h, w).mean(dim=1)
+        if init_cam is not None:
+            init_cam_feat = world_feat[init_cam + torch.arange(B) * N]
+            cam_prob = self.pred_cam(init_cam_feat).view([-1])
+            cam_mask = torch.ones(B * N).cuda()
+            cam_mask[init_cam + torch.arange(B) * N] = 0
+            cam_prob = cam_prob * cam_mask
+            if self.training:
+                world_feat = (init_cam_feat +
+                              (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
+            else:
+                # cam_prob = cam_prob > 0
+                # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
+                # cam_selection = distribution.sample()
+                cam_selection = cam_prob.view([B, N]).argmax(dim=1)
+                world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
+        else:
+            world_feat = world_feat.view(B, N, C, h, w).mean(dim=1)
         world_feat = torch.cat([world_feat, self.coord_map.repeat([B, 1, 1, 1]).to(world_feat.device)], 1)
         world_feat = self.world_feat(world_feat)
         world_feat = self.upsample(world_feat)
@@ -188,13 +209,13 @@ def test():
     from multiview_detector.utils.decode import ctdet_decode
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=False, augmentation=False)
-    dataloader = DataLoader(dataset, 1, False, num_workers=0)
+    dataloader = DataLoader(dataset, 2, False, num_workers=0)
     model = MVDet(dataset).cuda()
-    # model.load_state_dict(torch.load(
-    #     '../../logs/wildtrack/augFCS_deform_trans_lr0.001_baseR0.1_neck128_out64_alpha1.0_id0_drop0.5_dropcam0.0_worldRK4_10_imgRK12_10_2021-04-09_22-39-28/MultiviewDetector.pth'))
+    model.eval()
     imgs, world_gt, imgs_gt, affine_mats, frame = next(iter(dataloader))
     imgs = imgs.cuda()
-    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = model(imgs, affine_mats)
+    init_cam = torch.tensor([4, 0], dtype=torch.long)
+    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = model(imgs, affine_mats, init_cam)
     xysc = ctdet_decode(world_heatmap, world_offset)
     pass
 

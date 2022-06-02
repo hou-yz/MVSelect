@@ -1,3 +1,4 @@
+import random
 import time
 import os
 import numpy as np
@@ -20,13 +21,14 @@ class BaseTrainer(object):
 
 
 class PerspectiveTrainer(BaseTrainer):
-    def __init__(self, model, logdir, cls_thres=0.4, alpha=1.0, use_mse=False, id_ratio=0):
+    def __init__(self, model, logdir, select=False, cls_thres=0.4, alpha=1.0, use_mse=False, id_ratio=0):
         super(BaseTrainer, self).__init__()
         self.model = model
         self.mse_loss = nn.MSELoss()
         self.focal_loss = FocalLoss()
         self.regress_loss = RegL1Loss()
         self.ce_loss = RegCELoss()
+        self.select = select
         self.cls_thres = cls_thres
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
@@ -34,7 +36,7 @@ class PerspectiveTrainer(BaseTrainer):
         self.use_mse = use_mse
         self.id_ratio = id_ratio
 
-    def train(self, epoch, dataloader, optimizer, scaler, scheduler=None, log_interval=100):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
         self.model.train()
         losses = 0
         t0 = time.time()
@@ -48,7 +50,12 @@ class PerspectiveTrainer(BaseTrainer):
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             # with autocast():
             # supervised
-            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = self.model(data, affine_mats)
+            if self.select:
+                init_cam = torch.randint(N, [B]) if random.random() > 0.5 else None
+            else:
+                init_cam = None
+            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
+                self.model(data, affine_mats, init_cam)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss_w_off = self.regress_loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
             # loss_w_id = self.ce_loss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
@@ -96,7 +103,7 @@ class PerspectiveTrainer(BaseTrainer):
                 pass
         return losses / len(dataloader)
 
-    def test(self, epoch, dataloader, res_fpath=None, visualize=False):
+    def test(self, epoch, dataloader, res_fpath=None, init_cam=None, visualize=False):
         self.model.eval()
         losses = 0
         res_list = []
@@ -108,7 +115,8 @@ class PerspectiveTrainer(BaseTrainer):
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             # with autocast():
             with torch.no_grad():
-                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = self.model(data, affine_mats)
+                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
+                    self.model(data, affine_mats, init_cam)
                 loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
                 loss = loss_w_hm
                 if self.use_mse:
@@ -130,7 +138,6 @@ class PerspectiveTrainer(BaseTrainer):
                 for b in range(B):
                     ids = scores[b].squeeze() > self.cls_thres
                     pos, s = positions[b, ids], scores[b, ids, 0]
-                    res = torch.cat([torch.ones([len(s), 1]) * frame[b], pos], dim=1)
                     ids, count = nms(pos, s, 20, np.inf)
                     res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
                     res_list.append(res)

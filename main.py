@@ -75,11 +75,7 @@ def main(args):
     # logging
     if args.resume is None:
         logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}' \
-                 f'{"aug_" if args.augmentation else ""}_lr{args.lr}_baseR{args.base_lr_ratio}_' \
-                 f'neck{args.bottleneck_dim}_out{args.outfeat_dim}_' \
-                 f'alpha{args.alpha}_id{args.id_ratio}_drop{args.dropout}_dropcam{args.dropcam}_' \
-                 f'worldRK{args.world_reduce}_{args.world_kernel_size}_imgRK{args.img_reduce}_{args.img_kernel_size}_' \
-                 f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
+                 f'{"S_" if args.select else ""}lr{args.lr}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
         copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
         for script in os.listdir('.'):
@@ -102,7 +98,6 @@ def main(args):
                     "lr": args.lr * args.base_lr_ratio, }, ]
     # optimizer = optim.SGD(param_dicts, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
-    scaler = GradScaler()
 
     # def warmup_lr_scheduler(epoch, warmup_epochs=2):
     #     if epoch < warmup_epochs:
@@ -116,7 +111,7 @@ def main(args):
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 15], 0.1)
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
 
-    trainer = PerspectiveTrainer(model, logdir, args.cls_thres, args.alpha, args.use_mse, args.id_ratio)
+    trainer = PerspectiveTrainer(model, logdir, args.select, args.cls_thres, args.alpha, args.use_mse, args.id_ratio)
 
     # draw curve
     x_epoch = []
@@ -129,7 +124,7 @@ def main(args):
     if args.resume is None:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss = trainer.train(epoch, train_loader, optimizer, scaler, scheduler)
+            train_loss = trainer.train(epoch, train_loader, optimizer, scheduler)
             print('Testing...')
             test_loss, moda = trainer.test(epoch, test_loader, res_fpath, visualize=True)
 
@@ -144,7 +139,15 @@ def main(args):
         model.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth'))
         model.eval()
     print('Test loaded model...')
-    trainer.test(None, test_loader, res_fpath, visualize=True)
+
+    test_losses, modas = [], []
+    for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
+        print(f'init camera {init_cam}:')
+        test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, visualize=True)
+        test_losses.append(test_loss)
+        modas.append(moda)
+    test_loss, moda = np.average(test_losses), np.average(modas)
+    print(f'average moda: {moda:.2f}%')
 
 
 if __name__ == '__main__':
@@ -171,6 +174,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2021, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     parser.add_argument('--augmentation', type=str2bool, default=True)
+    parser.add_argument('--select', type=str2bool, default=False)
 
     parser.add_argument('--bottleneck_dim', type=int, default=128)
     parser.add_argument('--outfeat_dim', type=int, default=0)
