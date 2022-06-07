@@ -36,7 +36,7 @@ class PerspectiveTrainer(BaseTrainer):
         self.use_mse = use_mse
         self.id_ratio = id_ratio
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
+    def train(self, epoch, dataloader, optimizer, schedulers=(), optimizer_select=None, log_interval=100):
         self.model.train()
         losses = 0
         t0 = time.time()
@@ -51,7 +51,8 @@ class PerspectiveTrainer(BaseTrainer):
             # with autocast():
             # supervised
             if self.select:
-                init_cam = torch.randint(N, [B]) if random.random() > 0.5 else None
+                # init_cam = torch.randint(N, [B]) if random.random() > 0.5 else None
+                init_cam = 'all' if random.random() > 0.5 else None
             else:
                 init_cam = None
             (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
@@ -75,9 +76,15 @@ class PerspectiveTrainer(BaseTrainer):
             t_f = time.time()
             t_forward += t_f - t_b
 
-            optimizer.zero_grad()
+            if optimizer_select is not None and init_cam is not None:
+                optimizer_select.zero_grad()
+            else:
+                optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            if optimizer_select is not None and init_cam is not None:
+                optimizer_select.step()
+            else:
+                optimizer.step()
 
             # scaler.scale(loss).backward()
             # scaler.step(optimizer)
@@ -88,7 +95,7 @@ class PerspectiveTrainer(BaseTrainer):
             t_b = time.time()
             t_backward += t_b - t_f
 
-            if scheduler is not None:
+            for scheduler in schedulers:
                 if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                     scheduler.step()
                 elif isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts) or \
@@ -174,12 +181,3 @@ class PerspectiveTrainer(BaseTrainer):
         print(f'Test, loss: {losses / len(dataloader):.6f}, Time: {t_epoch:.3f}')
 
         return losses / len(dataloader), moda
-
-    def process_pseudo_gt(self, img_res):
-        imgs_heatmap, imgs_offset, imgs_wh, imgs_id = img_res
-        imgs_detections = ctdet_decode(imgs_heatmap, imgs_offset, imgs_wh, imgs_id)
-        BN, K, _ = imgs_detections.shape
-        imgs_detections = imgs_detections.view(BN * K, -1)
-        world_xys = self.model.proj_mats * torch.cat([imgs_detections[:, :2],
-                                                      torch.ones([BN * K, 1], device=imgs_detections.device)], dim=1)
-        world_xys = world_xys[:, :2] / world_xys[:, 2]

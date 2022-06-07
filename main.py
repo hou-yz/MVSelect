@@ -93,11 +93,14 @@ def main(args):
     model = MVDet(train_set, args.arch, bottleneck_dim=args.bottleneck_dim, outfeat_dim=args.outfeat_dim,
                   droupout=args.dropout).cuda()
 
-    param_dicts = [{"params": [p for n, p in model.named_parameters() if 'base' not in n and p.requires_grad], },
-                   {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
-                    "lr": args.lr * args.base_lr_ratio, }, ]
+    mvdet_param_dicts = [{"params": [p for n, p in model.named_parameters()
+                                     if 'base' not in n and 'cam_' not in n and p.requires_grad], },
+                         {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
+                          "lr": args.lr * args.base_lr_ratio, }, ]
+    select_param_dicts = [{"params": [p for n, p in model.named_parameters() if 'cam_' in n and p.requires_grad], }, ]
     # optimizer = optim.SGD(param_dicts, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
-    optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    optimizer_mvdet = optim.Adam(mvdet_param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    optimizer_select = optim.Adam(select_param_dicts, lr=args.lr * args.select_lr_ratio, weight_decay=args.weight_decay)
 
     # def warmup_lr_scheduler(epoch, warmup_epochs=2):
     #     if epoch < warmup_epochs:
@@ -105,11 +108,15 @@ def main(args):
     #     else:
     #         return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
-                                                    epochs=args.epochs)
-    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 15], 0.1)
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
+    # scheduler_mvdet = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
+    scheduler_mvdet = torch.optim.lr_scheduler.OneCycleLR(optimizer_mvdet, max_lr=args.lr,
+                                                          steps_per_epoch=len(train_loader),
+                                                          epochs=args.epochs)
+    # scheduler_mvdet = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 15], 0.1)
+    # scheduler_mvdet = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
+    scheduler_select = torch.optim.lr_scheduler.OneCycleLR(optimizer_select, max_lr=args.lr,
+                                                           steps_per_epoch=len(train_loader),
+                                                           epochs=args.epochs)
 
     trainer = PerspectiveTrainer(model, logdir, args.select, args.cls_thres, args.alpha, args.use_mse, args.id_ratio)
 
@@ -124,7 +131,8 @@ def main(args):
     if args.resume is None:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss = trainer.train(epoch, train_loader, optimizer, scheduler)
+            train_loss = trainer.train(epoch, train_loader, optimizer_mvdet,
+                                       (scheduler_mvdet,), optimizer_select)
             print('Testing...')
             test_loss, moda = trainer.test(epoch, test_loader, res_fpath, visualize=True)
 
@@ -139,10 +147,10 @@ def main(args):
         model.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth'))
         model.eval()
     print('Test loaded model...')
-
     test_losses, modas = [], []
     for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
         print(f'init camera {init_cam}:')
+        init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
         test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, visualize=True)
         test_losses.append(test_loss)
         modas.append(moda)
@@ -168,6 +176,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
     parser.add_argument('--base_lr_ratio', type=float, default=0.1)
+    parser.add_argument('--select_lr_ratio', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
