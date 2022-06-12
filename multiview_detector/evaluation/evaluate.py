@@ -29,7 +29,7 @@ def evaluate(res_fpath, gt_fpath, dataset='wildtrack'):
     except:
         from multiview_detector.evaluation.pyeval.evaluateDetection import evaluateDetection_py
 
-        recall, precision, moda, modp = evaluateDetection_py(res_fpath, gt_fpath, dataset)
+        recall, precision, moda, modp = evaluateDetection_py(res_fpath, gt_fpath)
     return recall, precision, moda, modp
 
 
