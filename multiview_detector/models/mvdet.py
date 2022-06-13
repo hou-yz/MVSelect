@@ -2,7 +2,6 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from multiview_detector.models.resnet import resnet18
@@ -92,9 +91,12 @@ class MVDet(nn.Module):
                                       nn.Conv2d(hidden_dim, base_dim, 3, 1, 1), nn.ReLU(), )
 
         # select camera based on initialization
-        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-                                      nn.Linear(hidden_dim, dataset.num_cam), nn.Softmax(dim=1))
-        self.cam_emb = nn.Embedding(dataset.num_cam, hidden_dim)
+        self.cam_pred = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
+                                      nn.AdaptiveAvgPool2d((1, 1)),
+                                      # nn.Conv2d(hidden_dim, hidden_dim, 1), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, dataset.num_cam, 1), nn.Softmax2d())
 
         # world heads
         self.world_heatmap = output_head(base_dim, outfeat_dim, 1)
@@ -165,31 +167,24 @@ class MVDet(nn.Module):
         world_feat = self.downsample(world_feat.view(B * N, C, H, W))
         _, _, h, w = world_feat.shape
         if init_cam is not None:
-            if self.training:
-                init_cam = torch.arange(N, device=imgs.device).repeat(B)
-                world_feat_repeat = torch.arange(N, device=imgs.device).repeat(N).repeat(B) + \
-                                    torch.arange(B, device=imgs.device).repeat_interleave(N * N) * N
-                B *= N
-            else:
-                assert init_cam.shape[0] == B
-            init_cam_feat = world_feat if self.training else world_feat[init_cam +
-                                                                        torch.arange(B, device=imgs.device) * N]
-            cam_emb = self.cam_emb(init_cam) if self.training else \
-                self.cam_emb(init_cam + torch.arange(B, device=imgs.device) * N)
-            cam_prob = self.cam_pred(F.adaptive_avg_pool2d(init_cam_feat, (1, 1)).view(B, C).detach() +
-                                     cam_emb).view([-1])
+            init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
+            cam_prob = self.cam_pred(init_cam_feat).view([-1])
             cam_mask = torch.ones(B * N, device=imgs.device)
             cam_mask[init_cam + torch.arange(B, device=imgs.device) * N] = 0
             cam_prob = cam_prob * cam_mask
             if self.training:
-                world_feat = (init_cam_feat + (world_feat[world_feat_repeat].view([B, N, C, h, w]).detach() *
-                                               cam_prob.view([B, N, 1, 1, 1])).mean(dim=1)) / 2
+                world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
+                                           ).view(B, N, C, h, w).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
+                # world_feat = (init_cam_feat +
+                #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
             else:
                 # cam_prob = cam_prob > 0
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
                 cam_selection = cam_prob.view([B, N]).argmax(dim=1)
-                world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B, device=imgs.device) * N]) / 2
+                world_feat = torch.stack([world_feat[cam_selection + torch.arange(B, device=imgs.device) * N],
+                                          init_cam_feat], dim=1).mean(dim=1)
+                # world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
         else:
             world_feat = world_feat.view(B, N, C, h, w).mean(dim=1)
         world_feat = torch.cat([world_feat, self.coord_map.repeat([B, 1, 1, 1]).to(world_feat.device)], 1)
@@ -223,7 +218,7 @@ def test():
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=False, augmentation=False)
     dataloader = DataLoader(dataset, 1, False, num_workers=0)
     model = MVDet(dataset).cuda()
-    model.eval()
+    # model.eval()
     imgs, world_gt, imgs_gt, affine_mats, frame = next(iter(dataloader))
     imgs = imgs.cuda()
     init_cam = torch.tensor([4], dtype=torch.long).cuda()

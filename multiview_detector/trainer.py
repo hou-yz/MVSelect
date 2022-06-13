@@ -36,7 +36,7 @@ class PerspectiveTrainer(BaseTrainer):
         self.use_mse = use_mse
         self.id_ratio = id_ratio
 
-    def train(self, epoch, dataloader, optimizer, schedulers=(), optimizer_select=None, log_interval=100):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
         self.model.train()
         losses = 0
         t0 = time.time()
@@ -48,11 +48,8 @@ class PerspectiveTrainer(BaseTrainer):
             data = data.cuda()
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
-            # with autocast():
-            # supervised
             if self.select:
-                # init_cam = torch.randint(N, [B]) if random.random() > 0.5 else None
-                init_cam = 'all' if random.random() > 0.5 else None
+                init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.5 else None
             else:
                 init_cam = None
             (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
@@ -64,7 +61,6 @@ class PerspectiveTrainer(BaseTrainer):
             loss_img_off = self.regress_loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
             loss_img_wh = self.regress_loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
             # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
-            # multiview regularization
 
             w_loss = loss_w_hm + loss_w_off  # + self.id_ratio * loss_w_id
             img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.id_ratio * loss_img_id
@@ -76,26 +72,16 @@ class PerspectiveTrainer(BaseTrainer):
             t_f = time.time()
             t_forward += t_f - t_b
 
-            if optimizer_select is not None and init_cam is not None:
-                optimizer_select.zero_grad()
-            else:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
-            if optimizer_select is not None and init_cam is not None:
-                optimizer_select.step()
-            else:
-                optimizer.step()
-
-            # scaler.scale(loss).backward()
-            # scaler.step(optimizer)
-            # scaler.update()
+            optimizer.step()
 
             losses += loss.item()
 
             t_b = time.time()
             t_backward += t_b - t_f
 
-            for scheduler in schedulers:
+            if scheduler is not None:
                 if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                     scheduler.step()
                 elif isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts) or \
