@@ -2,6 +2,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from multiview_detector.models.resnet import resnet18
@@ -96,7 +97,7 @@ class MVDet(nn.Module):
                                       nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
                                       nn.AdaptiveAvgPool2d((1, 1)),
                                       # nn.Conv2d(hidden_dim, hidden_dim, 1), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, dataset.num_cam, 1), nn.Softmax2d())
+                                      nn.Conv2d(hidden_dim, dataset.num_cam, 1))
 
         # world heads
         self.world_heatmap = output_head(base_dim, outfeat_dim, 1)
@@ -168,20 +169,27 @@ class MVDet(nn.Module):
         _, _, h, w = world_feat.shape
         if init_cam is not None:
             init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
-            cam_prob = self.cam_pred(init_cam_feat).view([-1])
-            cam_mask = torch.ones(B * N, device=imgs.device)
-            cam_mask[init_cam + torch.arange(B, device=imgs.device) * N] = 0
-            cam_prob = cam_prob * cam_mask
+            cam_prob = self.cam_pred(init_cam_feat).view([B, N])
+            cam_candidate = torch.ones([B, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
             if self.training:
+                # gumbel softmax trick
+                # mask out the original camera
+                y_soft = F.gumbel_softmax(cam_prob, dim=1) * cam_candidate
+                # F.gumbel_softmax(cam_prob, hard=True)
+                index = y_soft.max(-1, keepdim=True)[1]
+                y_hard = torch.zeros_like(y_soft).scatter_(-1, index, 1.0)
+                cam_prob = y_hard - y_soft.detach() + y_soft
                 world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
                                            ).view(B, N, C, h, w).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat +
                 #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
             else:
+                # mask out the original camera
+                cam_prob = F.softmax(cam_prob, dim=1) * cam_candidate
                 # cam_prob = cam_prob > 0
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
-                cam_selection = cam_prob.view([B, N]).argmax(dim=1)
+                cam_selection = cam_prob.argmax(dim=1)
                 world_feat = torch.stack([world_feat[cam_selection + torch.arange(B, device=imgs.device) * N],
                                           init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
@@ -216,12 +224,12 @@ def test():
     from multiview_detector.utils.decode import ctdet_decode
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=False, augmentation=False)
-    dataloader = DataLoader(dataset, 1, False, num_workers=0)
+    dataloader = DataLoader(dataset, 2, False, num_workers=0)
     model = MVDet(dataset).cuda()
     # model.eval()
     imgs, world_gt, imgs_gt, affine_mats, frame = next(iter(dataloader))
     imgs = imgs.cuda()
-    init_cam = torch.tensor([4], dtype=torch.long).cuda()
+    init_cam = torch.tensor([4, 0], dtype=torch.long).cuda()
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = model(imgs, affine_mats, init_cam)
     xysc = ctdet_decode(world_heatmap, world_offset)
     pass
