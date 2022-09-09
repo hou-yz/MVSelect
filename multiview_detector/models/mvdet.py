@@ -40,7 +40,7 @@ def create_coord_map(img_size, with_r=False):
 
 
 class MVDet(nn.Module):
-    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, hidden_dim=128, outfeat_dim=64, droupout=0.5):
+    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, hidden_dim=128, outfeat_dim=0, droupout=0.0):
         super().__init__()
         self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.img_reduce = dataset.img_reduce
@@ -84,12 +84,11 @@ class MVDet(nn.Module):
         downsample_stride = 2
         self.downsample = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, downsample_stride, 1), nn.ReLU(), )
         self.coord_map = create_coord_map(np.array(dataset.Rworld_shape) // downsample_stride)
-        combined_input_dim = base_dim + 2
-        self.world_feat = nn.Sequential(nn.Conv2d(combined_input_dim, hidden_dim, 3, padding=1), nn.ReLU(),
+        self.world_feat = nn.Sequential(nn.Conv2d(base_dim + 2, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
         self.upsample = nn.Sequential(nn.Upsample(dataset.Rworld_shape, mode='bilinear', align_corners=False),
-                                      nn.Conv2d(hidden_dim, base_dim, 3, 1, 1), nn.ReLU(), )
+                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(), )
 
         # select camera based on initialization
         self.cam_pred = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
@@ -100,9 +99,9 @@ class MVDet(nn.Module):
                                       nn.Conv2d(hidden_dim, dataset.num_cam, 1))
 
         # world heads
-        self.world_heatmap = output_head(base_dim, outfeat_dim, 1)
-        self.world_offset = output_head(base_dim, outfeat_dim, 2)
-        # self.world_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
+        self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
+        self.world_offset = output_head(hidden_dim, outfeat_dim, 2)
+        # self.world_id = output_head(hidden_dim, outfeat_dim, len(dataset.pid_dict))
 
         # init
         self.img_heatmap[-1].bias.data.fill_(-2.19)
@@ -156,36 +155,30 @@ class MVDet(nn.Module):
 
         # world feat
         H, W = self.Rworld_shape
-        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device),
-                                      self.Rworld_shape, align_corners=False).view(B, N, C, H, W)
+        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape, align_corners=False)
         if visualize:
             for cam in range(N):
-                visualize_img = array2heatmap(torch.norm(world_feat[0, cam].detach(), dim=0).cpu())
+                visualize_img = array2heatmap(torch.norm(world_feat.view(B, N, C, H, W)[0, cam].detach(), dim=0).cpu())
                 visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
 
-        world_feat = self.downsample(world_feat.view(B * N, C, H, W))
+        world_feat = self.downsample(world_feat)
         _, _, h, w = world_feat.shape
         if init_cam is not None:
             init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
             cam_prob = self.cam_pred(init_cam_feat).view([B, N])
+            # mask out the original camera
             cam_candidate = torch.ones([B, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
             if self.training:
                 # gumbel softmax trick
-                # mask out the original camera
-                y_soft = F.gumbel_softmax(cam_prob, dim=1) * cam_candidate
-                # F.gumbel_softmax(cam_prob, hard=True)
-                index = y_soft.max(-1, keepdim=True)[1]
-                y_hard = torch.zeros_like(y_soft).scatter_(-1, index, 1.0)
-                cam_prob = y_hard - y_soft.detach() + y_soft
+                cam_prob = F.gumbel_softmax(cam_prob, dim=1, hard=True)
                 world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
                                            ).view(B, N, C, h, w).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat +
                 #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
             else:
-                # mask out the original camera
-                cam_prob = F.softmax(cam_prob, dim=1) * cam_candidate
+                cam_prob = F.softmax(cam_prob, dim=1)
                 # cam_prob = cam_prob > 0
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
