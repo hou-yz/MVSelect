@@ -81,14 +81,10 @@ class MVDet(nn.Module):
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        downsample_stride = 2
-        self.downsample = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, downsample_stride, 1), nn.ReLU(), )
-        self.coord_map = create_coord_map(np.array(dataset.Rworld_shape) // downsample_stride)
+        self.coord_map = create_coord_map(np.array(dataset.Rworld_shape))
         self.world_feat = nn.Sequential(nn.Conv2d(base_dim + 2, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
-        self.upsample = nn.Sequential(nn.Upsample(dataset.Rworld_shape, mode='bilinear', align_corners=False),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(), )
 
         # select camera based on initialization
         self.cam_pred = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
@@ -163,8 +159,6 @@ class MVDet(nn.Module):
                 plt.imshow(visualize_img)
                 plt.show()
 
-        world_feat = self.downsample(world_feat)
-        _, _, h, w = world_feat.shape
         if init_cam is not None:
             init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
             cam_prob = self.cam_pred(init_cam_feat).view([B, N])
@@ -174,7 +168,7 @@ class MVDet(nn.Module):
                 # gumbel softmax trick
                 cam_prob = F.gumbel_softmax(cam_prob, dim=1, hard=True)
                 world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
-                                           ).view(B, N, C, h, w).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
+                                           ).view(B, N, C, H, W).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat +
                 #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
             else:
@@ -187,10 +181,9 @@ class MVDet(nn.Module):
                                           init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
         else:
-            world_feat = world_feat.view(B, N, C, h, w).mean(dim=1)
+            world_feat = world_feat.view(B, N, C, H, W).mean(dim=1)
         world_feat = torch.cat([world_feat, self.coord_map.repeat([B, 1, 1, 1]).to(world_feat.device)], 1)
         world_feat = self.world_feat(world_feat)
-        world_feat = self.upsample(world_feat)
 
         # world heads
         world_heatmap = self.world_heatmap(world_feat)
