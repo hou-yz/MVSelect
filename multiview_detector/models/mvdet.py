@@ -177,6 +177,10 @@ class MVDet(nn.Module):
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
                 cam_selection = cam_prob.argmax(dim=1)
+                
+                # cam_selection = torch.as_tensor([6]).cuda() #!
+                # print(cam_selection, cam_prob.argmax(dim=1)) #!
+
                 world_feat = torch.stack([world_feat[cam_selection + torch.arange(B, device=imgs.device) * N],
                                           init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
