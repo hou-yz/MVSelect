@@ -92,17 +92,19 @@ def main(args):
     # model
     model = MVDet(train_set, args.arch, bottleneck_dim=args.bottleneck_dim, outfeat_dim=args.outfeat_dim,
                   droupout=args.dropout).cuda()
-    #! seperate training
-    if args.select:
-        model.load_state_dict(torch.load(f'multiview_detector/MultiviewDetector.pth'))
+
+    # ! separate training
+    # if args.select:
+    #     model.load_state_dict(torch.load(f'logs/{args.dataset}/MultiviewDetector.pth'))
+    #     args.alpha = 0
 
     param_dicts = [{"params": [p for n, p in model.named_parameters() if 'base' not in n and p.requires_grad], },
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
                     "lr": args.lr * args.base_lr_ratio, }, ]
     # param_dicts = [{"params": [p for n, p in model.named_parameters() if 'cam_pred' in n and p.requires_grad], }]
     # optimizer = optim.SGD(param_dicts, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
     # optimizer = optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
-    optimizer = optim.AdamW(model.cam_pred.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     # def warmup_lr_scheduler(epoch, warmup_epochs=2):
@@ -127,8 +129,6 @@ def main(args):
     test_loss_s = []
     test_moda_s = []
 
-
-
     # learn
     res_fpath = os.path.join(logdir, 'test.txt')
 
@@ -140,17 +140,17 @@ def main(args):
             test_loss, moda = trainer.test(epoch, test_loader, res_fpath, visualize=True)
 
             # test selection
-            if args.select:
-                print('Test loaded model...')
-                test_losses, modas = [], []
-                for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
-                    print(f'init camera {init_cam}:')
-                    init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
-                    test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, visualize=True)
-                    test_losses.append(test_loss)
-                    modas.append(moda)
-                test_loss, moda = np.average(test_losses), np.average(modas)
-                print(f'average moda: {moda:.2f}%')
+            # if args.select:
+            #     print('Test loaded model...')
+            #     test_losses, modas = [], []
+            #     for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
+            #         print(f'init camera {init_cam}:')
+            #         init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
+            #         test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, visualize=True)
+            #         test_losses.append(test_loss)
+            #         modas.append(moda)
+            #     test_loss, moda = np.average(test_losses), np.average(modas)
+            #     print(f'average moda: {moda:.2f}%')
 
             # draw & save
             x_epoch.append(epoch)
