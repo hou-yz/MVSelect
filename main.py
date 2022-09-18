@@ -83,7 +83,7 @@ def main(args):
     # logging
     if args.resume is None:
         logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}' \
-                 f'{"SL_" if args.select else ""}max_1c_lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
+                 f'{"SL_" if args.select else ""}mean_1c_lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
                  f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
         copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
@@ -163,8 +163,8 @@ def main(args):
 
     # learn
     res_fpath = os.path.join(logdir, 'test.txt')
-    trainer.test(0, test_loader, res_fpath)
-    test_with_select()
+    # trainer.test(0, test_loader, res_fpath)
+    # test_with_select()
 
     if args.resume is None:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):

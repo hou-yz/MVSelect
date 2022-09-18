@@ -50,7 +50,7 @@ class PerspectiveTrainer(BaseTrainer):
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.select:
-                init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.1 else None
+                init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.0 else None
             else:
                 init_cam = None
             (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
