@@ -44,6 +44,7 @@ class MVDet(nn.Module):
         super().__init__()
         self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.img_reduce = dataset.img_reduce
+        self.num_cam = dataset.num_cam
 
         # world grid change to xy indexing
         world_zoom_mat = np.diag([dataset.world_reduce, dataset.world_reduce, 1])
@@ -167,17 +168,25 @@ class MVDet(nn.Module):
             if self.training:
                 # gumbel softmax trick
                 cam_prob = F.gumbel_softmax(cam_prob, dim=1, hard=True)
+                cam_selection = cam_prob.argmax(dim=1)
+                # # mask out the original camera
+                # y_soft = F.gumbel_softmax(cam_prob, dim=1) * cam_candidate
+                # # F.gumbel_softmax(cam_prob, hard=True)
+                # cam_selection = y_soft.argmax(dim=1)
+                # y_hard = torch.zeros_like(y_soft).scatter_(-1, cam_selection[:, None], 1.0)
+                # cam_prob = y_hard - y_soft.detach() + y_soft
                 world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
                                            ).view(B, N, C, H, W).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = (init_cam_feat +
                 #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
             else:
-                cam_prob = F.softmax(cam_prob, dim=1)
+                # mask out the original camera
+                cam_prob = F.softmax(cam_prob, dim=1)  # * cam_candidate
                 # cam_prob = cam_prob > 0
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
                 cam_selection = cam_prob.argmax(dim=1)
-                
+
                 # cam_selection = torch.as_tensor([6]).cuda() #!
                 # print(cam_selection, cam_prob.argmax(dim=1)) #!
 
@@ -186,6 +195,7 @@ class MVDet(nn.Module):
                 # world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
         else:
             world_feat = world_feat.view(B, N, C, H, W).mean(dim=1)
+            cam_selection = None
         world_feat = torch.cat([world_feat, self.coord_map.repeat([B, 1, 1, 1]).to(world_feat.device)], 1)
         world_feat = self.world_feat(world_feat)
 
@@ -203,7 +213,7 @@ class MVDet(nn.Module):
             visualize_img.save(f'../../imgs/worldres.png')
             plt.imshow(visualize_img)
             plt.show()
-        return (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh)
+        return (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection
 
 
 def test():
@@ -220,7 +230,8 @@ def test():
     imgs, world_gt, imgs_gt, affine_mats, frame = next(iter(dataloader))
     imgs = imgs.cuda()
     init_cam = torch.tensor([4, 0], dtype=torch.long).cuda()
-    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = model(imgs, affine_mats, init_cam)
+    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
+        model(imgs, affine_mats, init_cam)
     xysc = ctdet_decode(world_heatmap, world_offset)
     pass
 

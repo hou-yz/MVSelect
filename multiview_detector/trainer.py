@@ -43,16 +43,17 @@ class PerspectiveTrainer(BaseTrainer):
         t_b = time.time()
         t_forward = 0
         t_backward = 0
+        selected_cams = []
         for batch_idx, (data, world_gt, imgs_gt, affine_mats, frame) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
             data = data.cuda()
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.select:
-                init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.5 else None
+                init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.1 else None
             else:
                 init_cam = None
-            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
+            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
                 self.model(data, affine_mats, init_cam)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss_w_off = self.regress_loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
@@ -68,6 +69,9 @@ class PerspectiveTrainer(BaseTrainer):
             if self.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
                        self.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+
+            if init_cam is not None:
+                selected_cams.extend(cam_selection.detach().cpu().numpy().tolist())
 
             t_f = time.time()
             t_forward += t_f - t_b
@@ -93,6 +97,11 @@ class PerspectiveTrainer(BaseTrainer):
                 t_epoch = t1 - t0
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, loss: {losses / (batch_idx + 1):.6f}, '
                       f'Time: {t_epoch:.1f}, maxima: {world_heatmap.max():.3f}')
+
+                if self.select:
+                    unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
+                    print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
+                                   zip(unique_cams, unique_freq / len(selected_cams))))
                 pass
         return losses / len(dataloader)
 
@@ -101,6 +110,7 @@ class PerspectiveTrainer(BaseTrainer):
         losses = 0
         res_list = []
         t0 = time.time()
+        selected_cams = []
         for batch_idx, (data, world_gt, imgs_gt, affine_mats, frame) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
             data = data.cuda()
@@ -108,13 +118,15 @@ class PerspectiveTrainer(BaseTrainer):
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             # with autocast():
             with torch.no_grad():
-                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh) = \
+                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
                     self.model(data, affine_mats, init_cam)
-                loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
-                loss = loss_w_hm
-                if self.use_mse:
-                    loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
-                           self.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+            loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
+            loss = loss_w_hm
+            if self.use_mse:
+                loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
+                       self.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+            if init_cam is not None:
+                selected_cams.extend(cam_selection.detach().cpu().numpy().tolist())
 
             losses += loss.item()
 
@@ -137,6 +149,11 @@ class PerspectiveTrainer(BaseTrainer):
 
         t1 = time.time()
         t_epoch = t1 - t0
+
+        if init_cam is not None:
+            unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
+            print(' '.join('cam {} {} |'.format(cam, freq) for cam, freq in
+                           zip(unique_cams, unique_freq / len(selected_cams))))
 
         if visualize:
             # visualizing the heatmap for world
@@ -164,6 +181,6 @@ class PerspectiveTrainer(BaseTrainer):
         else:
             moda = 0
 
-        print(f'Test, loss: {losses / len(dataloader):.6f}, Time: {t_epoch:.3f}')
+        # print(f'Test, loss: {losses / len(dataloader):.6f}, Time: {t_epoch:.3f}')
 
         return losses / len(dataloader), moda
