@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ['OMP_NUM_THREADS'] = '1'
 import argparse
@@ -47,6 +48,13 @@ def main(args):
     else:
         torch.backends.cudnn.benchmark = True
 
+    # camera select module
+    if args.select:
+        args.alpha = 0
+        args.lr = 1e-4 if args.lr is None else args.lr
+    else:
+        args.lr = 5e-4 if args.lr is None else args.lr
+
     # dataset
     if 'wildtrack' in args.dataset:
         base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -75,7 +83,8 @@ def main(args):
     # logging
     if args.resume is None:
         logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}' \
-                 f'{"S_" if args.select else ""}lr{args.lr}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
+                 f'{"SL_" if args.select else ""}max_1c_lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
+                 f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
         copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
         for script in os.listdir('.'):
@@ -94,17 +103,23 @@ def main(args):
                   droupout=args.dropout).cuda()
 
     # ! separate training
-    # if args.select:
-    #     model.load_state_dict(torch.load(f'logs/{args.dataset}/MultiviewDetector.pth'))
-    #     args.alpha = 0
+    if args.select:
+        pretrained_dict = torch.load(f'logs/{args.dataset}/MultiviewDetector.pth')
+        model_dict = model.state_dict()
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
 
-    param_dicts = [{"params": [p for n, p in model.named_parameters() if 'base' not in n and p.requires_grad], },
+    param_dicts = [{"params": [p for n, p in model.named_parameters()
+                               if 'base' not in n and 'cam' not in n and p.requires_grad], },
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
-                    "lr": args.lr * args.base_lr_ratio, }, ]
+                    "lr": args.lr * args.base_lr_ratio, },
+                   {"params": [p for n, p in model.named_parameters() if 'cam' in n and p.requires_grad],
+                    "lr": args.lr * args.select_lr_ratio, }, ]
     # param_dicts = [{"params": [p for n, p in model.named_parameters() if 'cam_pred' in n and p.requires_grad], }]
     # optimizer = optim.SGD(param_dicts, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
-    optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
-    # optimizer = optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    # optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
     # optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     # def warmup_lr_scheduler(epoch, warmup_epochs=2):
@@ -114,14 +129,31 @@ def main(args):
     #         return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
-                                                    epochs=args.epochs)
+    if args.select:
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
+                                                        epochs=args.epochs)
+    else:
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
+                                                        epochs=args.epochs)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=args.epochs,eta_min=1e-6)
     # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer,base_lr=args.lr*0.01,max_lr=args.lr,step_size_up=100,cycle_momentum=True)
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 15], 0.1)
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
 
     trainer = PerspectiveTrainer(model, logdir, args.select, args.cls_thres, args.alpha, args.use_mse, args.id_ratio)
+
+    def test_with_select():
+        t0 = time.time()
+        test_losses, modas = [], []
+        for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
+            print(f'init camera {init_cam}:')
+            init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
+            test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam)
+            test_losses.append(test_loss)
+            modas.append(moda)
+        test_loss, moda = np.average(test_losses), np.average(modas)
+        print(f'average moda: {moda:.2f}%, time: {time.time() - t0:.2f}')
+        return test_loss, moda
 
     # draw curve
     x_epoch = []
@@ -131,26 +163,15 @@ def main(args):
 
     # learn
     res_fpath = os.path.join(logdir, 'test.txt')
+    trainer.test(0, test_loader, res_fpath)
+    test_with_select()
 
     if args.resume is None:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
             train_loss = trainer.train(epoch, train_loader, optimizer, scheduler)
             print('Testing...')
-            test_loss, moda = trainer.test(epoch, test_loader, res_fpath, visualize=True)
-
-            # test selection
-            # if args.select:
-            #     print('Test loaded model...')
-            #     test_losses, modas = [], []
-            #     for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
-            #         print(f'init camera {init_cam}:')
-            #         init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
-            #         test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, visualize=True)
-            #         test_losses.append(test_loss)
-            #         modas.append(moda)
-            #     test_loss, moda = np.average(test_losses), np.average(modas)
-            #     print(f'average moda: {moda:.2f}%')
+            test_loss, moda = test_with_select()
 
             # draw & save
             x_epoch.append(epoch)
@@ -163,15 +184,8 @@ def main(args):
         model.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth'))
         model.eval()
     print('Test loaded model...')
-    test_losses, modas = [], []
-    for init_cam in np.arange(train_set.num_cam) if args.select else [None]:
-        print(f'init camera {init_cam}:')
-        init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
-        test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, visualize=True)
-        test_losses.append(test_loss)
-        modas.append(moda)
-    test_loss, moda = np.average(test_losses), np.average(modas)
-    print(f'average moda: {moda:.2f}%')
+    trainer.test(args.epochs, test_loader, res_fpath)
+    test_with_select()
 
 
 if __name__ == '__main__':
@@ -190,8 +204,9 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
+    parser.add_argument('--lr', type=float, default=None, help='learning rate')
     parser.add_argument('--base_lr_ratio', type=float, default=0.1)
+    parser.add_argument('--select_lr_ratio', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
