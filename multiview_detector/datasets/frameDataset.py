@@ -222,10 +222,12 @@ class frameDataset(VisionDataset):
         #                                         align_corners=False).bool().float()
         drop, keep_cams = np.random.rand() < self.dropout, torch.ones(self.num_cam, dtype=torch.bool)
         if drop:
-            drop_cam = np.random.randint(0, self.num_cam)
-            keep_cams[drop_cam] = 0
-            for key in imgs_gt:
-                imgs_gt[key][drop_cam] = 0
+            num_drop = np.random.randint(self.num_cam-1)
+            drop_cams = np.random.choice(self.num_cam, num_drop, replace=False)
+            for cam in drop_cams:
+                keep_cams[cam] = 0
+                for key in imgs_gt:
+                    imgs_gt[key][cam] = 0
         # world gt
         world_pt_s, world_pid_s = self.world_gt[frame]
         world_gt = get_gt(self.Rworld_shape, world_pt_s[:, 0], world_pt_s[:, 1], v_s=world_pid_s,
@@ -241,7 +243,7 @@ def test(test_projection=False):
     from multiview_detector.datasets.Wildtrack import Wildtrack
     from multiview_detector.datasets.MultiviewX import MultiviewX
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=True, augmentation=False)
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=True, augmentation=True, dropout=1)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), train=True)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=True, semi_supervised=.1)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), train=True, semi_supervised=.1)
@@ -258,7 +260,8 @@ def test(test_projection=False):
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
     # imgs, world_gt, imgs_gt, M, frame, keep_cams = next(iter(dataloader))
     t0 = time.time()
-    imgs, world_gt, imgs_gt, M, frame, keep_cams = dataset.__getitem__(0, visualize=False)
+    for i in range(10):
+        imgs, world_gt, imgs_gt, M, frame, keep_cams = dataset.__getitem__(i, visualize=False)
     print(time.time() - t0)
 
     pass
@@ -295,4 +298,4 @@ def test(test_projection=False):
 
 
 if __name__ == '__main__':
-    test(True)
+    test(False)
