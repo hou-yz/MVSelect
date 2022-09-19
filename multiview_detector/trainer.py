@@ -21,7 +21,7 @@ class BaseTrainer(object):
 
 
 class PerspectiveTrainer(BaseTrainer):
-    def __init__(self, model, logdir, args,):
+    def __init__(self, model, logdir, args, ):
         super(BaseTrainer, self).__init__()
         self.model = model
         self.args = args
@@ -48,7 +48,10 @@ class PerspectiveTrainer(BaseTrainer):
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.args.select:
-                init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.0 else None
+                # init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.0 else None
+                init_cam = 'all'
+                for key in world_gt.keys():
+                    world_gt[key] = world_gt[key].repeat_interleave(N, 0)
             else:
                 init_cam = None
             (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \

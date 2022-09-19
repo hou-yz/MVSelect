@@ -165,13 +165,15 @@ class MVDet(nn.Module):
         # world_feat = self.world_feat(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
 
         if init_cam is not None:
-            init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
-            cam_prob = self.cam_pred(init_cam_feat).view([B, N])
-            # mask out the original camera
-            cam_candidate = torch.ones([B, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
             if self.training:
+                init_cam = torch.arange(N, device=imgs.device)[None, :].repeat(B, 1)
+                # init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device)[:, None].repeat(1, N) * N]
+                init_cam_feat = world_feat
+                cam_prob = self.cam_pred(init_cam_feat).view([B * N, N])
+                # mask out the original camera
+                cam_candidate = torch.ones([B, N, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
                 # gumbel softmax trick
-                cam_prob = F.gumbel_softmax(cam_prob, dim=1, hard=True)
+                cam_prob = F.gumbel_softmax(cam_prob, dim=1, hard=False) * cam_candidate.view(B * N, N)
                 cam_selection = cam_prob.argmax(dim=1)
                 # # mask out the original camera
                 # y_soft = F.gumbel_softmax(cam_prob, dim=1) * cam_candidate
@@ -179,8 +181,9 @@ class MVDet(nn.Module):
                 # cam_selection = y_soft.argmax(dim=1)
                 # y_hard = torch.zeros_like(y_soft).scatter_(-1, cam_selection[:, None], 1.0)
                 # cam_prob = y_hard - y_soft.detach() + y_soft
-                world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
-                                           ).view(B, N, C, H, W).sum(dim=1), init_cam_feat], dim=1).mean(dim=1)
+                world_feat = torch.stack([(world_feat.view([B, N, C, H, W]).repeat_interleave(N, 0) *
+                                           cam_prob.view([B * N, N, 1, 1, 1])).sum(dim=1),
+                                          init_cam_feat], dim=1).mean(dim=1)
                 # world_feat = torch.cat([(world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, H, W),
                 #                         init_cam_feat[:, None]], dim=1).max(dim=1)[0]
                 # world_feat = (world_feat.view(B, N, C, H, W) *
@@ -188,8 +191,12 @@ class MVDet(nn.Module):
                 # world_feat = (init_cam_feat +
                 #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).sum(dim=1)) / 2
             else:
+                init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
+                cam_prob = self.cam_pred(init_cam_feat).view([B, N])
                 # mask out the original camera
-                cam_prob = F.softmax(cam_prob, dim=1)  # * cam_candidate
+                cam_candidate = torch.ones([B, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
+                # mask out the original camera
+                cam_prob = F.softmax(cam_prob, dim=1) * cam_candidate
                 # cam_prob = cam_prob > 0
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
@@ -204,7 +211,7 @@ class MVDet(nn.Module):
         else:
             world_feat = world_feat.view(B, N, C, H, W).mean(dim=1)
             cam_selection = None
-        world_feat = torch.cat([world_feat, self.coord_map.repeat([B, 1, 1, 1]).to(world_feat.device)], 1)
+        world_feat = torch.cat([world_feat, self.coord_map.repeat([world_feat.shape[0], 1, 1, 1]).to(imgs.device)], 1)
         world_feat = self.world_feat(world_feat)
 
         # world heads
