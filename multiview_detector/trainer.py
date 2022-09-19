@@ -21,23 +21,22 @@ class BaseTrainer(object):
 
 
 class PerspectiveTrainer(BaseTrainer):
-    def __init__(self, model, logdir, select=False, cls_thres=0.4, alpha=1.0, use_mse=False, id_ratio=0):
+    def __init__(self, model, logdir, args,):
         super(BaseTrainer, self).__init__()
         self.model = model
+        self.args = args
         self.mse_loss = nn.MSELoss()
         self.focal_loss = FocalLoss()
         self.regress_loss = RegL1Loss()
         self.ce_loss = RegCELoss()
-        self.select = select
-        self.cls_thres = cls_thres
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-        self.alpha = alpha
-        self.use_mse = use_mse
-        self.id_ratio = id_ratio
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
         self.model.train()
+        if self.args.select:
+            if self.args.base_lr_ratio == 0:
+                self.model.base.eval()
         losses = 0
         t0 = time.time()
         t_b = time.time()
@@ -48,7 +47,7 @@ class PerspectiveTrainer(BaseTrainer):
             B, N = imgs_gt['heatmap'].shape[:2]
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
-            if self.select:
+            if self.args.select:
                 init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.0 else None
             else:
                 init_cam = None
@@ -62,12 +61,12 @@ class PerspectiveTrainer(BaseTrainer):
             loss_img_wh = self.regress_loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
             # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
 
-            w_loss = loss_w_hm + loss_w_off  # + self.id_ratio * loss_w_id
-            img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.id_ratio * loss_img_id
-            loss = w_loss + img_loss / N * self.alpha
-            if self.use_mse:
+            w_loss = loss_w_hm + loss_w_off  # + self.args.id_ratio * loss_w_id
+            img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.args.id_ratio * loss_img_id
+            loss = w_loss + img_loss / N * self.args.alpha
+            if self.args.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
-                       self.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+                       self.args.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
 
             if init_cam is not None:
                 selected_cams.extend(cam_selection.detach().cpu().numpy().tolist())
@@ -97,7 +96,7 @@ class PerspectiveTrainer(BaseTrainer):
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, loss: {losses / (batch_idx + 1):.6f}, '
                       f'Time: {t_epoch:.1f}, maxima: {world_heatmap.max():.3f}')
 
-                if self.select:
+                if self.args.select:
                     unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                                    zip(unique_cams, unique_freq / len(selected_cams))))
@@ -121,9 +120,8 @@ class PerspectiveTrainer(BaseTrainer):
                     self.model(data, affine_mats, init_cam)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss = loss_w_hm
-            if self.use_mse:
-                loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
-                       self.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+            if self.args.use_mse:
+                loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
             if init_cam is not None:
                 selected_cams.extend(cam_selection.detach().cpu().numpy().tolist())
 
@@ -140,7 +138,7 @@ class PerspectiveTrainer(BaseTrainer):
                     positions = grid_xy[:, :, [1, 0]]
 
                 for b in range(B):
-                    ids = scores[b].squeeze() > self.cls_thres
+                    ids = scores[b].squeeze() > self.args.cls_thres
                     pos, s = positions[b, ids], scores[b, ids, 0]
                     ids, count = nms(pos, s, 20, np.inf)
                     res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)

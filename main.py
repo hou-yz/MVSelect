@@ -145,7 +145,7 @@ def main(args):
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 15], 0.1)
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
 
-    trainer = PerspectiveTrainer(model, logdir, args.select, args.cls_thres, args.alpha, args.use_mse, args.id_ratio)
+    trainer = PerspectiveTrainer(model, logdir, args)
 
     def test_with_select():
         t0 = time.time()
