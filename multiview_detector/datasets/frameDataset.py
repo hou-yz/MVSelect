@@ -230,7 +230,7 @@ class frameDataset(VisionDataset):
         world_pt_s, world_pid_s = self.world_gt[frame]
         world_gt = get_gt(self.Rworld_shape, world_pt_s[:, 0], world_pt_s[:, 1], v_s=world_pid_s,
                           reduce=self.world_reduce, top_k=self.top_k, kernel_size=self.world_kernel_size)
-        return imgs, world_gt, imgs_gt, affine_mats, frame
+        return imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams
 
     def __len__(self):
         return len(self.world_gt.keys())
@@ -256,9 +256,9 @@ def test(test_projection=False):
             min_dist = min(min_dist, np.min(xy_dists))
             pass
     dataloader = DataLoader(dataset, 2, True, num_workers=0)
-    # imgs, world_gt, imgs_gt, M, frame = next(iter(dataloader))
+    # imgs, world_gt, imgs_gt, M, frame, keep_cams = next(iter(dataloader))
     t0 = time.time()
-    imgs, world_gt, imgs_gt, M, frame = dataset.__getitem__(0, visualize=False)
+    imgs, world_gt, imgs_gt, M, frame, keep_cams = dataset.__getitem__(0, visualize=False)
     print(time.time() - t0)
 
     pass
