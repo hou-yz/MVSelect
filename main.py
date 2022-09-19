@@ -51,6 +51,8 @@ def main(args):
     # camera select module
     if args.select:
         args.alpha = 0
+        # args.base_lr_ratio = 0.0
+        # args.other_lr_ratio = 0.1
         args.lr = 1e-4 if args.lr is None else args.lr
     else:
         args.lr = 5e-4 if args.lr is None else args.lr
@@ -83,8 +85,9 @@ def main(args):
     # logging
     if args.resume is None:
         logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}' \
-                 f'{"SL_" if args.select else ""}mean_1c_lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
-                 f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
+                 f'{"SL_" if args.select else ""}mean_1c_lr{args.lr}_' \
+                 f'base{args.base_lr_ratio}select{args.select_lr_ratio}other{args.other_lr_ratio}_' \
+                 f'b{args.batch_size}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
         copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
         for script in os.listdir('.'):
@@ -111,7 +114,8 @@ def main(args):
         model.load_state_dict(model_dict)
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
-                               if 'base' not in n and 'cam' not in n and p.requires_grad], },
+                               if 'base' not in n and 'cam' not in n and p.requires_grad],
+                    "lr": args.lr * args.other_lr_ratio, },
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
                     "lr": args.lr * args.base_lr_ratio, },
                    {"params": [p for n, p in model.named_parameters() if 'cam' in n and p.requires_grad],
@@ -130,6 +134,7 @@ def main(args):
 
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
     if args.select:
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
                                                         epochs=args.epochs)
     else:
@@ -207,6 +212,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=None, help='learning rate')
     parser.add_argument('--base_lr_ratio', type=float, default=0.1)
     parser.add_argument('--select_lr_ratio', type=float, default=1.0)
+    parser.add_argument('--other_lr_ratio', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
