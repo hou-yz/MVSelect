@@ -44,9 +44,8 @@ class PerspectiveTrainer(BaseTrainer):
         t_forward = 0
         t_backward = 0
         selected_cams = []
-        for batch_idx, (data, world_gt, imgs_gt, affine_mats, frame) in enumerate(dataloader):
+        for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
-            data = data.cuda()
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.select:
@@ -54,11 +53,11 @@ class PerspectiveTrainer(BaseTrainer):
             else:
                 init_cam = None
             (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
-                self.model(data, affine_mats, init_cam)
+                self.model(imgs.cuda(), affine_mats, init_cam, keep_cams)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss_w_off = self.regress_loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
             # loss_w_id = self.ce_loss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
-            loss_img_hm = self.focal_loss(imgs_heatmap, imgs_gt['heatmap'])
+            loss_img_hm = self.focal_loss(imgs_heatmap, imgs_gt['heatmap'], keep_cams.view(B * N, 1, 1, 1))
             loss_img_off = self.regress_loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
             loss_img_wh = self.regress_loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
             # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
@@ -111,7 +110,7 @@ class PerspectiveTrainer(BaseTrainer):
         res_list = []
         t0 = time.time()
         selected_cams = []
-        for batch_idx, (data, world_gt, imgs_gt, affine_mats, frame) in enumerate(dataloader):
+        for batch_idx, (data, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
             data = data.cuda()
             for key in imgs_gt.keys():

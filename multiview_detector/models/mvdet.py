@@ -108,8 +108,10 @@ class MVDet(nn.Module):
         fill_fc_weights(self.world_offset)
         pass
 
-    def forward(self, imgs, M, init_cam=None, visualize=False):
+    def forward(self, imgs, M, init_cam=None, keep_cams=None, visualize=False):
         B, N, C, H, W = imgs.shape
+        if keep_cams is None:
+            keep_cams = torch.ones([B, N], dtype=torch.bool)
         # B = init_cam.shape
         imgs = imgs.view(B * N, C, H, W)
 
@@ -136,7 +138,7 @@ class MVDet(nn.Module):
                 plt.show()
 
         imgs_feat = self.base(imgs)
-        imgs_feat = self.bottleneck(imgs_feat)
+        imgs_feat = self.bottleneck(imgs_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
@@ -160,6 +162,8 @@ class MVDet(nn.Module):
                 plt.imshow(visualize_img)
                 plt.show()
 
+        # world_feat = self.world_feat(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
+
         if init_cam is not None:
             init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
             cam_prob = self.cam_pred(init_cam_feat).view([B, N])
@@ -176,9 +180,13 @@ class MVDet(nn.Module):
                 # y_hard = torch.zeros_like(y_soft).scatter_(-1, cam_selection[:, None], 1.0)
                 # cam_prob = y_hard - y_soft.detach() + y_soft
                 world_feat = torch.stack([(world_feat * cam_prob.view([B * N, 1, 1, 1])
-                                           ).view(B, N, C, H, W).mean(dim=1), init_cam_feat], dim=1).mean(dim=1)
+                                           ).view(B, N, C, H, W).sum(dim=1), init_cam_feat], dim=1).mean(dim=1)
+                # world_feat = torch.cat([(world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, H, W),
+                #                         init_cam_feat[:, None]], dim=1).max(dim=1)[0]
+                # world_feat = (world_feat.view(B, N, C, H, W) *
+                #               cam_prob.scatter(1, init_cam[:, None], 1).view(B, N, 1, 1, 1)).max(dim=1)[0]
                 # world_feat = (init_cam_feat +
-                #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).mean(dim=1)) / 2
+                #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).sum(dim=1)) / 2
             else:
                 # mask out the original camera
                 cam_prob = F.softmax(cam_prob, dim=1)  # * cam_candidate
@@ -227,11 +235,11 @@ def test():
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
     model = MVDet(dataset).cuda()
     # model.eval()
-    imgs, world_gt, imgs_gt, affine_mats, frame = next(iter(dataloader))
+    imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     imgs = imgs.cuda()
     init_cam = torch.tensor([4, 0], dtype=torch.long).cuda()
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
-        model(imgs, affine_mats, init_cam)
+        model(imgs, affine_mats, init_cam, keep_cams)
     xysc = ctdet_decode(world_heatmap, world_offset)
     pass
 
