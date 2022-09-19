@@ -41,7 +41,7 @@ class FocalLoss(nn.Module):
         neg_loss = torch.log(1 - output) * torch.pow(output, 2) * neg_weights * neg_inds
 
         num_pos = pos_inds.float().sum()
-        pos_loss = pos_loss.sum()
+        pos_loss = (pos_loss * mask).sum()
         neg_loss = (neg_loss * mask).sum()
 
         if num_pos == 0:
