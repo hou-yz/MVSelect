@@ -40,7 +40,7 @@ def create_coord_map(img_size, with_r=False):
 
 
 class MVDet(nn.Module):
-    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, hidden_dim=128, outfeat_dim=0, droupout=0.0):
+    def __init__(self, dataset, arch='resnet18', z=0, bottleneck_dim=128, hidden_dim=128, outfeat_dim=0):
         super().__init__()
         self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.img_reduce = dataset.img_reduce
@@ -70,7 +70,7 @@ class MVDet(nn.Module):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         if bottleneck_dim:
-            self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, bottleneck_dim, 1), nn.Dropout2d(droupout))
+            self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, bottleneck_dim, 1), nn.ReLU())
             base_dim = bottleneck_dim
         else:
             self.bottleneck = nn.Identity()
@@ -88,12 +88,10 @@ class MVDet(nn.Module):
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
         # select camera based on initialization
-        self.cam_pred = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
-                                      nn.AdaptiveAvgPool2d((1, 1)),
-                                      # nn.Conv2d(hidden_dim, hidden_dim, 1), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, dataset.num_cam, 1))
+        self.cam_pred = nn.Sequential(nn.AdaptiveMaxPool2d((1, 1)),
+                                      nn.Conv2d(hidden_dim, hidden_dim, 1), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, dataset.num_cam, 1, bias=False))
+        self.cam_emb = nn.Embedding(dataset.num_cam, hidden_dim)
 
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
@@ -106,9 +104,11 @@ class MVDet(nn.Module):
         fill_fc_weights(self.img_wh)
         self.world_heatmap[-1].bias.data.fill_(-2.19)
         fill_fc_weights(self.world_offset)
+
+        self.cam_pred[-1].weight.data.fill_(0)
         pass
 
-    def forward(self, imgs, M, init_cam=None, keep_cams=None, visualize=False):
+    def forward(self, imgs, M, init_cam=None, keep_cams=None, override=None, visualize=False):
         B, N, C, H, W = imgs.shape
         if keep_cams is None:
             keep_cams = torch.ones([B, N], dtype=torch.bool)
@@ -169,7 +169,8 @@ class MVDet(nn.Module):
                 init_cam = torch.arange(N, device=imgs.device)[None, :].repeat(B, 1)
                 # init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device)[:, None].repeat(1, N) * N]
                 init_cam_feat = world_feat
-                cam_prob = self.cam_pred(init_cam_feat).view([B * N, N])
+                cam_emb = self.cam_emb(init_cam.view(-1))[:, :, None, None]
+                cam_prob = self.cam_pred(init_cam_feat + cam_emb).view([B * N, N])
                 # mask out the original camera
                 cam_candidate = torch.ones([B, N, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
                 # gumbel softmax trick
@@ -181,18 +182,19 @@ class MVDet(nn.Module):
                 # cam_selection = y_soft.argmax(dim=1)
                 # y_hard = torch.zeros_like(y_soft).scatter_(-1, cam_selection[:, None], 1.0)
                 # cam_prob = y_hard - y_soft.detach() + y_soft
-                world_feat = torch.stack([(world_feat.view([B, N, C, H, W]).repeat_interleave(N, 0) *
-                                           cam_prob.view([B * N, N, 1, 1, 1])).sum(dim=1),
-                                          init_cam_feat], dim=1).mean(dim=1)
+                # world_feat = torch.cat([(world_feat.view([B, N, C, H, W]).repeat_interleave(N, 0) *
+                #                          cam_prob.view([B * N, N, 1, 1, 1])),
+                #                         init_cam_feat[:, None]], dim=1).max(dim=1)[0]
                 # world_feat = torch.cat([(world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, H, W),
                 #                         init_cam_feat[:, None]], dim=1).max(dim=1)[0]
-                # world_feat = (world_feat.view(B, N, C, H, W) *
-                #               cam_prob.scatter(1, init_cam[:, None], 1).view(B, N, 1, 1, 1)).max(dim=1)[0]
+                world_feat = (world_feat.view(B, N, C, H, W).repeat_interleave(N, 0) *
+                              cam_prob.scatter(1, init_cam.view(-1, 1), 1).view(B * N, N, 1, 1, 1)).max(dim=1)[0]
                 # world_feat = (init_cam_feat +
                 #               (world_feat * cam_prob.view([B * N, 1, 1, 1])).view(B, N, C, h, w).sum(dim=1)) / 2
             else:
                 init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
-                cam_prob = self.cam_pred(init_cam_feat).view([B, N])
+                cam_emb = self.cam_emb(init_cam)[:, :, None, None]
+                cam_prob = self.cam_pred(init_cam_feat + cam_emb).view([B, N])
                 # mask out the original camera
                 cam_candidate = torch.ones([B, N], device=imgs.device).scatter(1, init_cam[:, None], 0)
                 # mask out the original camera
@@ -202,14 +204,14 @@ class MVDet(nn.Module):
                 # cam_selection = distribution.sample()
                 cam_selection = cam_prob.argmax(dim=1)
 
-                # cam_selection = torch.as_tensor([6]).cuda() #!
-                # print(cam_selection, cam_prob.argmax(dim=1)) #!
+                if override is not None:
+                    cam_selection = torch.as_tensor([override]).long().cuda()
 
                 world_feat = torch.stack([world_feat[cam_selection + torch.arange(B, device=imgs.device) * N],
-                                          init_cam_feat], dim=1).mean(dim=1)
+                                          init_cam_feat], dim=1).max(dim=1)[0]
                 # world_feat = (init_cam_feat + world_feat[cam_selection + torch.arange(B).cuda() * N]) / 2
         else:
-            world_feat = world_feat.view(B, N, C, H, W).mean(dim=1)
+            world_feat = world_feat.view(B, N, C, H, W).max(dim=1)[0]
             cam_selection = None
         world_feat = torch.cat([world_feat, self.coord_map.repeat([world_feat.shape[0], 1, 1, 1]).to(imgs.device)], 1)
         world_feat = self.world_feat(world_feat)
@@ -238,13 +240,15 @@ def test():
     from torch.utils.data import DataLoader
     from multiview_detector.utils.decode import ctdet_decode
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=False, augmentation=False)
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), img_reduce=20)
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
     model = MVDet(dataset).cuda()
-    # model.eval()
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     imgs = imgs.cuda()
     init_cam = torch.tensor([4, 0], dtype=torch.long).cuda()
+    model.train()
+    _ = model(imgs, affine_mats, init_cam, keep_cams)
+    model.eval()
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
         model(imgs, affine_mats, init_cam, keep_cams)
     xysc = ctdet_decode(world_heatmap, world_offset)

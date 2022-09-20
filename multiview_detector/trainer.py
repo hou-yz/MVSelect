@@ -106,7 +106,7 @@ class PerspectiveTrainer(BaseTrainer):
                 pass
         return losses / len(dataloader)
 
-    def test(self, epoch, dataloader, res_fpath=None, init_cam=None, visualize=False):
+    def test(self, epoch, dataloader, res_fpath=None, init_cam=None, override=None, visualize=False):
         self.model.eval()
         losses = 0
         res_list = []
@@ -120,7 +120,7 @@ class PerspectiveTrainer(BaseTrainer):
             # with autocast():
             with torch.no_grad():
                 (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
-                    self.model(data, affine_mats, init_cam)
+                    self.model(data, affine_mats, init_cam, override=override)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss = loss_w_hm
             if self.args.use_mse:
