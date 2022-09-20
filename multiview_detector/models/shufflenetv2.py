@@ -7,7 +7,6 @@ from torch import Tensor
 from torch.hub import load_state_dict_from_url
 from torchvision.utils import _log_api_usage_once
 
-
 __all__ = ["ShuffleNetV2", "shufflenet_v2_x0_5", "shufflenet_v2_x1_0", "shufflenet_v2_x1_5", "shufflenet_v2_x2_0"]
 
 model_urls = {
@@ -34,19 +33,21 @@ def channel_shuffle(x: Tensor, groups: int) -> Tensor:
 
 
 class InvertedResidual(nn.Module):
-    def __init__(self, inp: int, oup: int, stride: int) -> None:
+    def __init__(self, inp: int, oup: int, stride: int, stride2dilation: bool = False, dilation: int = 1) -> None:
         super().__init__()
 
         if not (1 <= stride <= 3):
             raise ValueError("illegal stride value")
         self.stride = stride
+        self.stride2dilation = stride2dilation
+        self.dilation = dilation
 
         branch_features = oup // 2
-        assert (self.stride != 1) or (inp == branch_features << 1)
+        assert self.stride != 1 or self.stride2dilation or (inp == branch_features << 1)
 
-        if self.stride > 1:
+        if self.stride > 1 or self.stride2dilation:
             self.branch1 = nn.Sequential(
-                self.depthwise_conv(inp, inp, kernel_size=3, stride=self.stride, padding=1),
+                self.depthwise_conv(inp, inp, kernel_size=3, stride=self.stride, dilation=self.dilation),
                 nn.BatchNorm2d(inp),
                 nn.Conv2d(inp, branch_features, kernel_size=1, stride=1, padding=0, bias=False),
                 nn.BatchNorm2d(branch_features),
@@ -57,7 +58,7 @@ class InvertedResidual(nn.Module):
 
         self.branch2 = nn.Sequential(
             nn.Conv2d(
-                inp if (self.stride > 1) else branch_features,
+                inp if self.stride > 1 or self.stride2dilation else branch_features,
                 branch_features,
                 kernel_size=1,
                 stride=1,
@@ -66,7 +67,8 @@ class InvertedResidual(nn.Module):
             ),
             nn.BatchNorm2d(branch_features),
             nn.ReLU(inplace=True),
-            self.depthwise_conv(branch_features, branch_features, kernel_size=3, stride=self.stride, padding=1),
+            self.depthwise_conv(branch_features, branch_features, kernel_size=3, stride=self.stride,
+                                dilation=self.dilation),
             nn.BatchNorm2d(branch_features),
             nn.Conv2d(branch_features, branch_features, kernel_size=1, stride=1, padding=0, bias=False),
             nn.BatchNorm2d(branch_features),
@@ -75,12 +77,12 @@ class InvertedResidual(nn.Module):
 
     @staticmethod
     def depthwise_conv(
-        i: int, o: int, kernel_size: int, stride: int = 1, padding: int = 0, bias: bool = False
+            i: int, o: int, kernel_size: int, stride: int = 1, bias: bool = False, dilation: int = 1
     ) -> nn.Conv2d:
-        return nn.Conv2d(i, o, kernel_size, stride, padding, bias=bias, groups=i)
+        return nn.Conv2d(i, o, kernel_size, stride, dilation, bias=bias, groups=i, dilation=dilation)
 
     def forward(self, x: Tensor) -> Tensor:
-        if self.stride == 1:
+        if self.stride == 1 and not self.stride2dilation:
             x1, x2 = x.chunk(2, dim=1)
             out = torch.cat((x1, self.branch2(x2)), dim=1)
         else:
@@ -93,11 +95,11 @@ class InvertedResidual(nn.Module):
 
 class ShuffleNetV2(nn.Module):
     def __init__(
-        self,
-        stages_repeats: List[int],
-        stages_out_channels: List[int],
-        num_classes: int = 1000,
-        inverted_residual: Callable[..., nn.Module] = InvertedResidual,
+            self,
+            stages_repeats: List[int],
+            stages_out_channels: List[int],
+            num_classes: int = 1000,
+            replace_stride_with_dilation=None,
     ) -> None:
         super().__init__()
         _log_api_usage_once(self)
@@ -107,6 +109,15 @@ class ShuffleNetV2(nn.Module):
         if len(stages_out_channels) != 5:
             raise ValueError("expected stages_out_channels as list of 5 positive ints")
         self._stage_out_channels = stages_out_channels
+
+        self.dilation = 1
+        if replace_stride_with_dilation is None:
+            # each element in the tuple indicates if we should replace
+            # the 2x2 stride with a dilated convolution instead
+            replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError("replace_stride_with_dilation should be None "
+                             "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
 
         input_channels = 3
         output_channels = self._stage_out_channels[0]
@@ -124,10 +135,11 @@ class ShuffleNetV2(nn.Module):
         self.stage3: nn.Sequential
         self.stage4: nn.Sequential
         stage_names = [f"stage{i}" for i in [2, 3, 4]]
-        for name, repeats, output_channels in zip(stage_names, stages_repeats, self._stage_out_channels[1:]):
-            seq = [inverted_residual(input_channels, output_channels, 2)]
-            for i in range(repeats - 1):
-                seq.append(inverted_residual(output_channels, output_channels, 1))
+        for i, (name, repeats, output_channels) in enumerate(
+                zip(stage_names, stages_repeats, self._stage_out_channels[1:])):
+            seq = [self._make_layer(input_channels, output_channels, 2, replace_stride_with_dilation[i])]
+            for _ in range(repeats - 1):
+                seq.append(self._make_layer(output_channels, output_channels, 1))
             setattr(self, name, nn.Sequential(*seq))
             input_channels = output_channels
 
@@ -139,6 +151,12 @@ class ShuffleNetV2(nn.Module):
         )
 
         self.fc = nn.Linear(output_channels, num_classes)
+
+    def _make_layer(self, input_channels, output_channels, stride=1, dilate=False):
+        if dilate:
+            self.dilation *= stride
+            stride = 1
+        return InvertedResidual(input_channels, output_channels, stride, dilate, self.dilation)
 
     def _forward_impl(self, x: Tensor) -> Tensor:
         # See note [TorchScript super()]
@@ -220,3 +238,9 @@ def shufflenet_v2_x2_0(pretrained: bool = False, progress: bool = True, **kwargs
         progress (bool): If True, displays a progress bar of the download to stderr
     """
     return _shufflenetv2("shufflenetv2_x2.0", pretrained, progress, [4, 8, 4], [24, 244, 488, 976, 2048], **kwargs)
+
+
+if __name__ == '__main__':
+    img = torch.zeros([14, 3, 720, 1280])
+    model = shufflenet_v2_x0_5(pretrained=True, replace_stride_with_dilation=[False, True, True])
+    output = model(img)
