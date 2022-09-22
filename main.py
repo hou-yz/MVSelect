@@ -11,7 +11,6 @@ import tqdm
 import random
 import numpy as np
 import torch
-from torch.cuda.amp import GradScaler
 from torch import optim
 from torch.utils.data import DataLoader
 from multiview_detector.datasets import *
@@ -84,8 +83,8 @@ def main(args):
 
     # logging
     if args.resume is None:
-        logdir = f'logs/{args.dataset}/{"debug_" if is_debug else ""}' \
-                 f'{"SL_" if args.select else ""}max_dropcam{args.dropcam}_lr{args.lr}_' \
+        logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
+                 f'{args.arch}_{"SL_" if args.select else ""}max_single_dropcam{args.dropcam}_lr{args.lr}_' \
                  f'base{args.base_lr_ratio}select{args.select_lr_ratio}other{args.other_lr_ratio}_' \
                  f'b{args.batch_size}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
@@ -102,11 +101,15 @@ def main(args):
     print(vars(args))
 
     # model
-    model = MVDet(train_set, args.arch, bottleneck_dim=args.bottleneck_dim, outfeat_dim=args.outfeat_dim).cuda()
+    model = MVDet(train_set, args.arch, use_bottleneck=args.use_bottleneck, outfeat_dim=args.outfeat_dim).cuda()
 
-    # ! separate training
+    # load checkpoint
     if args.select:
-        pretrained_dict = torch.load(f'logs/{args.dataset}/MultiviewDetector.pth')
+        with open(f'logs/{args.dataset}/performance.txt', 'r') as fp:
+            result_str = fp.read()
+        print(result_str)
+        load_dir = result_str.split('\n')[1]
+        pretrained_dict = torch.load(f'{load_dir}/MultiviewDetector.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'cam_' not in k}
         model_dict.update(pretrained_dict)
@@ -196,10 +199,24 @@ def main(args):
         modas = []
         for cam in range(train_set.num_cam):
             modas.append(test_with_select(override=cam))
-        np.savetxt(f'{logdir}/modas.txt', modas, '%.2f')
+        modas = np.array(modas)
+        best2cam, avg2cam = np.mean(np.max(modas, axis=1)), np.mean(modas)
+        print(' '.join(f'cam {np.argmax(modas[cam])} {np.max(modas[cam]):.2f} |' for cam in range(train_set.num_cam)))
+        print(f'best {best2cam:.2f}, average {avg2cam:.2f}')
+        _, moda = trainer.test(args.epochs, test_loader, res_fpath)
+        np.savetxt(f'{logdir}/modas_{moda:.2f}_best{best2cam:.2f}_avg{avg2cam:.2f}.txt', modas, '%.2f',
+                   header=f'loading checkpoint...\n'
+                          f'{logdir}\n',
+                   footer=' '.join(f'cam {np.argmax(modas[cam])} {np.max(modas[cam]):.2f} |'
+                                   for cam in range(train_set.num_cam)) + '\n' +
+                          f'2 best cam: {best2cam:.2f}, 2 average cam: {avg2cam:.2f}\n'
+                          f'all cam: {moda:.2f}')
+        if args.resume is None:
+            shutil.copyfile(f'{logdir}/modas_{moda:.2f}_best{best2cam:.2f}_avg{avg2cam:.2f}.txt',
+                            f'logs/{args.dataset}/performance.txt')
+
     else:
         trainer.test(args.epochs, test_loader, res_fpath)
-    test_with_select()
 
 
 if __name__ == '__main__':
@@ -211,7 +228,7 @@ if __name__ == '__main__':
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)
-    parser.add_argument('--arch', type=str, default='resnet18', choices=['vgg11', 'resnet18', 'mobilenet'])
+    parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack', choices=['wildtrack', 'multiviewx'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
     parser.add_argument('-b', '--batch_size', type=int, default=1, help='input batch size for training')
@@ -230,7 +247,7 @@ if __name__ == '__main__':
     parser.add_argument('--augmentation', type=str2bool, default=True)
     parser.add_argument('--select', type=str2bool, default=False)
 
-    parser.add_argument('--bottleneck_dim', type=int, default=128)
+    parser.add_argument('--use_bottleneck', type=str2bool, default=True)
     parser.add_argument('--outfeat_dim', type=int, default=0)
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
