@@ -48,10 +48,13 @@ class PerspectiveTrainer(BaseTrainer):
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.args.select:
-                # init_cam = torch.randint(N, [B]).cuda() if random.random() > 0.0 else None
-                init_cam = 'all'
+                # init_cam = torch.tensor([np.random.choice(keep_cams[b].nonzero().squeeze())
+                #                          for b in range(B)]).long().cuda().view([B])
+                # init_cam = torch.randint(N, [B]).cuda() if np.random.random() > 0.0 else None
+                # init_cam = 'all'
+                init_cam = keep_cams.nonzero()
                 for key in world_gt.keys():
-                    world_gt[key] = world_gt[key].repeat_interleave(N, 0)
+                    world_gt[key] = world_gt[key][init_cam[:, 0]]
             else:
                 init_cam = None
             (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
