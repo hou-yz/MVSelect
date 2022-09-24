@@ -14,6 +14,16 @@ from multiview_detector.utils.tensor_utils import _transpose_and_gather_feat, _s
 import torch.nn.functional as F
 
 
+class Entropy(nn.Module):
+    def __init__(self):
+        super(Entropy, self).__init__()
+
+    def forward(self, x, dim=-1):
+        x = F.softmax(x, dim=dim) * F.log_softmax(x, dim=dim)
+        x = -1.0 * x.mean()
+        return x
+
+
 class FocalLoss(nn.Module):
     '''nn.Module warpper for focal loss'''
 
