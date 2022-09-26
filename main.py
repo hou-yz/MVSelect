@@ -49,12 +49,14 @@ def main(args):
 
     # camera select module
     if args.select:
-        args.alpha = 0
-        # args.base_lr_ratio = 0.0
-        # args.other_lr_ratio = 0.1
+        args.dropcam = 0.5
+        args.base_lr_ratio = 0.1 if args.base_lr_ratio is None else args.base_lr_ratio
+        args.other_lr_ratio = 0.1 if args.other_lr_ratio is None else args.other_lr_ratio
         args.lr = 1e-4 if args.lr is None else args.lr
     else:
         args.lr = 5e-4 if args.lr is None else args.lr
+        args.base_lr_ratio = 1.0 if args.base_lr_ratio is None else args.base_lr_ratio
+        args.other_lr_ratio = 1.0 if args.other_lr_ratio is None else args.other_lr_ratio
 
     # dataset
     if 'wildtrack' in args.dataset:
@@ -83,10 +85,13 @@ def main(args):
 
     # logging
     if args.resume is None:
-        logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}' \
-                 f'{args.arch}_{"SL_" if args.select else ""}max_single_dropcam{args.dropcam}_lr{args.lr}_' \
-                 f'base{args.base_lr_ratio}select{args.select_lr_ratio}other{args.other_lr_ratio}_' \
-                 f'b{args.batch_size}_e{args.epochs}_{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
+        select_settings = f'single_hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}_'
+        lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
+                      f'select{args.select_lr_ratio}' if args.select else ''
+        logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
+                 f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
+                 f'{select_settings if args.select else ""}' \
+                 f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
         copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
         for script in os.listdir('.'):
@@ -101,14 +106,14 @@ def main(args):
     print(vars(args))
 
     # model
-    model = MVDet(train_set, args.arch, use_bottleneck=args.use_bottleneck, outfeat_dim=args.outfeat_dim).cuda()
+    model = MVDet(train_set, args.arch, args.use_bottleneck, args.aggregation, args.hidden_dim, args.outfeat_dim).cuda()
 
     # load checkpoint
     if args.select:
-        with open(f'logs/{args.dataset}/performance.txt', 'r') as fp:
+        with open(f'logs/{args.dataset}/{args.arch}_performance.txt', 'r') as fp:
             result_str = fp.read()
         print(result_str)
-        load_dir = result_str.split('\n')[1]
+        load_dir = result_str.split('\n')[1].replace('# ', '')
         pretrained_dict = torch.load(f'{load_dir}/MultiviewDetector.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'cam_' not in k}
@@ -122,12 +127,10 @@ def main(args):
                     "lr": args.lr * args.base_lr_ratio, },
                    {"params": [p for n, p in model.named_parameters() if 'cam_' in n and p.requires_grad],
                     "lr": args.lr * args.select_lr_ratio, }, ]
-    # param_dicts = [{"params": [p for n, p in model.named_parameters() if 'cam_pred' in n and p.requires_grad], }]
-    # optimizer = optim.SGD(param_dicts, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
-    # optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
     optimizer = optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    # optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    # optimizer_cam = optim.AdamW(model.cam_pred.parameters(), lr=args.lr * args.select_lr_ratio,
+    #                             weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=3):
         if epoch < warmup_epochs:
@@ -135,19 +138,8 @@ def main(args):
         else:
             return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
 
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
-    # if args.select:
-    #     # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, args.epochs)
-    #     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
-    #     #                                                 epochs=args.epochs)
-    #     scheduler = None
-    # else:
-    #     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader),
-    #                                                     epochs=args.epochs)
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=args.epochs,eta_min=1e-6)
-    # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer,base_lr=args.lr*0.01,max_lr=args.lr,step_size_up=100,cycle_momentum=True)
-    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 15], 0.1)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
+    # scheduler_cam = torch.optim.lr_scheduler.LambdaLR(optimizer_cam, warmup_lr_scheduler)
 
     trainer = PerspectiveTrainer(model, logdir, args)
 
@@ -174,13 +166,24 @@ def main(args):
 
     # learn
     res_fpath = os.path.join(logdir, 'test.txt')
-    # trainer.test(0, test_loader, res_fpath)
-    # test_with_select()
 
     if args.resume is None:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss = trainer.train(epoch, train_loader, optimizer, scheduler)
+            # if not args.select:
+            train_loss = trainer.train(epoch, train_loader, optimizer, scheduler, args.hard)
+            # else:
+            #     if args.base_lr_ratio or args.other_lr_ratio:
+            #         train_loss = trainer.train(epoch, train_loader, (optimizer_cam, optimizer),
+            #                                    (scheduler_cam, scheduler), (args.hard, True))
+            #     else:
+            #         train_loss = trainer.train(epoch, train_loader, optimizer_cam, scheduler_cam, args.hard)
+
+            # train_loss_cam = trainer.train(epoch, train_loader, optimizer_cam, scheduler_cam,
+            #                                args.hard) if args.select else 0
+            # train_loss = trainer.train(epoch, train_loader, optimizer, scheduler,
+            #                            True) if args.base_lr_ratio or args.other_lr_ratio else 0
+
             print('Testing...')
             test_loss, moda = test_with_select()
 
@@ -195,6 +198,7 @@ def main(args):
         model.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth'))
         model.eval()
     print('Test loaded model...')
+    print(logdir)
     if not args.select:
         modas = []
         for cam in range(train_set.num_cam):
@@ -206,14 +210,14 @@ def main(args):
         _, moda = trainer.test(args.epochs, test_loader, res_fpath)
         np.savetxt(f'{logdir}/modas_{moda:.2f}_best{best2cam:.2f}_avg{avg2cam:.2f}.txt', modas, '%.2f',
                    header=f'loading checkpoint...\n'
-                          f'{logdir}\n',
+                          f'{logdir}',
                    footer=' '.join(f'cam {np.argmax(modas[cam])} {np.max(modas[cam]):.2f} |'
                                    for cam in range(train_set.num_cam)) + '\n' +
                           f'2 best cam: {best2cam:.2f}, 2 average cam: {avg2cam:.2f}\n'
                           f'all cam: {moda:.2f}')
         if args.resume is None:
             shutil.copyfile(f'{logdir}/modas_{moda:.2f}_best{best2cam:.2f}_avg{avg2cam:.2f}.txt',
-                            f'logs/{args.dataset}/performance.txt')
+                            f'logs/{args.dataset}/{args.arch}_performance.txt')
 
     else:
         trainer.test(args.epochs, test_loader, res_fpath)
@@ -229,6 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
     parser.add_argument('--use_mse', type=str2bool, default=False)
     parser.add_argument('--arch', type=str, default='resnet18')
+    parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack', choices=['wildtrack', 'multiviewx'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
     parser.add_argument('-b', '--batch_size', type=int, default=1, help='input batch size for training')
@@ -236,9 +241,9 @@ if __name__ == '__main__':
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=None, help='learning rate')
-    parser.add_argument('--base_lr_ratio', type=float, default=1.0)
+    parser.add_argument('--base_lr_ratio', type=float, default=None)
     parser.add_argument('--select_lr_ratio', type=float, default=1.0)
-    parser.add_argument('--other_lr_ratio', type=float, default=1.0)
+    parser.add_argument('--other_lr_ratio', type=float, default=None)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
@@ -249,10 +254,15 @@ if __name__ == '__main__':
 
     parser.add_argument('--use_bottleneck', type=str2bool, default=True)
     parser.add_argument('--outfeat_dim', type=int, default=0)
+    parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_reduce', type=int, default=12)
     parser.add_argument('--img_kernel_size', type=int, default=10)
+
+    parser.add_argument('--hard', type=str2bool, default=False)
+    parser.add_argument('--beta_conf', type=float, default=0.0)
+    parser.add_argument('--beta_even', type=float, default=0.0)
 
     args = parser.parse_args()
 

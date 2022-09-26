@@ -68,7 +68,7 @@ class PerspectiveTrainer(BaseTrainer):
             loss = w_loss + img_loss / N * self.args.alpha
             if self.args.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
-                       self.args.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
+                       self.args.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device)) / N
 
             # regularization
             if self.args.select:
@@ -97,8 +97,8 @@ class PerspectiveTrainer(BaseTrainer):
                 t1 = time.time()
                 t_epoch = t1 - t0
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, loss: {losses / (batch_idx + 1):.6f}, '
-                      f'Time: {t_epoch:.1f}, maxima: {world_heatmap.max().item():.3f}' +
-                      f', prob: {cam_prob.max().item():.3f}' if self.args.select else '')
+                      f'Time: {t_epoch:.1f}, maxima: {world_heatmap.amax(dim=[2, 3]).mean().item():.3f}' +
+                      f', prob: {cam_prob.max(dim=1)[0].mean().item():.3f}' if self.args.select else '')
                 if self.args.select:
                     unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
