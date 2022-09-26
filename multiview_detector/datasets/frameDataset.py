@@ -222,7 +222,7 @@ class frameDataset(VisionDataset):
         #                                         align_corners=False).bool().float()
         drop, keep_cams = np.random.rand() < self.dropout, torch.ones(self.num_cam, dtype=torch.bool)
         if drop:
-            num_drop = np.random.randint(self.num_cam-1)
+            num_drop = np.random.randint(self.num_cam // 2 + 1)
             drop_cams = np.random.choice(self.num_cam, num_drop, replace=False)
             for cam in drop_cams:
                 keep_cams[cam] = 0
