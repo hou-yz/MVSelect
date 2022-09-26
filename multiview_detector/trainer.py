@@ -29,36 +29,32 @@ class PerspectiveTrainer(BaseTrainer):
         self.focal_loss = FocalLoss()
         self.regress_loss = RegL1Loss()
         self.ce_loss = RegCELoss()
+        self.entropy = Entropy()
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, log_interval=100):
         self.model.train()
         if self.args.select:
             if self.args.base_lr_ratio == 0:
                 self.model.base.eval()
         losses = 0
         t0 = time.time()
-        t_b = time.time()
-        t_forward = 0
-        t_backward = 0
         selected_cams = []
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.args.select:
-                # init_cam = torch.tensor([np.random.choice(keep_cams[b].nonzero().squeeze())
-                #                          for b in range(B)]).long().cuda().view([B])
-                # init_cam = torch.randint(N, [B]).cuda() if np.random.random() > 0.0 else None
-                # init_cam = 'all'
+                # init_cam = torch.tensor([[b, np.random.choice(keep_cams[b].nonzero().squeeze())]
+                #                          for b in range(B)]).long()
                 init_cam = keep_cams.nonzero()
                 for key in world_gt.keys():
                     world_gt[key] = world_gt[key][init_cam[:, 0]]
             else:
                 init_cam = None
-            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
-                self.model(imgs.cuda(), affine_mats, init_cam, keep_cams)
+            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_prob = \
+                self.model(imgs.cuda(), affine_mats, init_cam, keep_cams, hard)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss_w_off = self.regress_loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
             # loss_w_id = self.ce_loss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
@@ -74,11 +70,14 @@ class PerspectiveTrainer(BaseTrainer):
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
                        self.args.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device))
 
-            if init_cam is not None:
-                selected_cams.extend(cam_selection.detach().cpu().numpy().tolist())
+            # regularization
+            if self.args.select:
+                reg_conf = self.entropy(cam_prob).mean()
+                reg_even = self.entropy(cam_prob.mean(dim=1))
+                loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
 
-            t_f = time.time()
-            t_forward += t_f - t_b
+            if init_cam is not None:
+                selected_cams.extend(cam_prob.argmax(dim=1).detach().cpu().numpy().tolist())
 
             optimizer.zero_grad()
             loss.backward()
@@ -86,22 +85,20 @@ class PerspectiveTrainer(BaseTrainer):
 
             losses += loss.item()
 
-            t_b = time.time()
-            t_backward += t_b - t_f
-
             if scheduler is not None:
                 if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                     scheduler.step()
                 elif isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts) or \
                         isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR):
                     scheduler.step(epoch - 1 + batch_idx / len(dataloader))
+            # logging
             if (batch_idx + 1) % log_interval == 0 or batch_idx + 1 == len(dataloader):
                 # print(cyclic_scheduler.last_epoch, optimizer.param_groups[0]['lr'])
                 t1 = time.time()
                 t_epoch = t1 - t0
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, loss: {losses / (batch_idx + 1):.6f}, '
-                      f'Time: {t_epoch:.1f}, maxima: {world_heatmap.max():.3f}')
-
+                      f'Time: {t_epoch:.1f}, maxima: {world_heatmap.max().item():.3f}' +
+                      f', prob: {cam_prob.max().item():.3f}' if self.args.select else '')
                 if self.args.select:
                     unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
@@ -122,14 +119,14 @@ class PerspectiveTrainer(BaseTrainer):
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             # with autocast():
             with torch.no_grad():
-                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_selection = \
+                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_prob = \
                     self.model(data, affine_mats, init_cam, override=override)
             loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
             loss = loss_w_hm
             if self.args.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
             if init_cam is not None:
-                selected_cams.extend(cam_selection.detach().cpu().numpy().tolist())
+                selected_cams.extend(cam_prob.argmax(dim=1).detach().cpu().numpy().tolist())
 
             losses += loss.item()
 
