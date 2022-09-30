@@ -25,39 +25,29 @@ class Entropy(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    '''nn.Module warpper for focal loss'''
-
-    def __init__(self):
+    def __init__(self, gamma=2, alpha=0.8):
         super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
 
     def forward(self, output, target, mask=None):
-        ''' Modified focal loss. Exactly the same as CornerNet.
-            Runs faster and costs a little bit more memory
-          Arguments:
-            output (batch x c x h x w)
-            target (batch x c x h x w)
-        '''
         if mask is None:
             mask = torch.ones_like(target)
         output = _sigmoid(output)
         target = target.to(output.device)
+        is_positive = target == 1
         mask = mask.to(output.device)
-        pos_inds = target.eq(1).float()
-        neg_inds = target.lt(1).float()
 
         neg_weights = torch.pow(1 - target, 4)
 
-        pos_loss = torch.log(output) * torch.pow(1 - output, 2) * pos_inds
-        neg_loss = torch.log(1 - output) * torch.pow(output, 2) * neg_weights * neg_inds
+        pos_loss = torch.log(output) * torch.pow(1 - output, self.gamma) * is_positive * mask
+        neg_loss = torch.log(1 - output) * torch.pow(output, self.gamma) * neg_weights * ~is_positive * mask
 
-        num_pos = pos_inds.float().sum()
-        pos_loss = (pos_loss * mask).sum()
-        neg_loss = (neg_loss * mask).sum()
+        if self.alpha >= 0:
+            pos_loss *= self.alpha
+            neg_loss *= 1 - self.alpha
 
-        if num_pos == 0:
-            loss = -neg_loss
-        else:
-            loss = -(pos_loss + neg_loss) / num_pos
+        loss = -(pos_loss + neg_loss).sum() / max(1, is_positive.sum())
         return loss
 
 
