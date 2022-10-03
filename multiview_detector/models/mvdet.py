@@ -69,22 +69,24 @@ def create_coord_map(img_size, with_r=False):
 
 
 class CamPredModule(nn.Module):
-    def __init__(self, num_cam, hidden_dim):
+    def __init__(self, num_cam, hidden_dim, world_shape):
         super().__init__()
-        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU())
-        # self.cam_emb = nn.Embedding(num_cam, hidden_dim)
-        # self.join = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1),
+                                      nn.LayerNorm([hidden_dim, world_shape[0], world_shape[1]]), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1),
+                                      nn.LayerNorm([hidden_dim, world_shape[0], world_shape[1]]), nn.ReLU())
+        self.cam_emb = nn.Embedding(num_cam, num_cam)
+        self.cam_emb.weight.data.fill_(0)
         # self.cam_pred = nn.Parameter(torch.randn(num_cam, hidden_dim))
-        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-                                      nn.Linear(hidden_dim, num_cam, bias=False))
+        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
+                                      nn.Linear(hidden_dim, num_cam, bias=False), nn.Tanh())
+        self.cam_pred[-2].weight.data.fill_(0)
 
     def forward(self, init_cam, init_cam_feat, cam_candidate, hard=False):
         cam_feat = self.cam_feat(init_cam_feat).amax(dim=[2, 3])
-        # cam_emb = self.cam_emb(init_cam)
-        # cam_feat = self.join(torch.cat([cam_feat, cam_emb], dim=1))
+        cam_emb = self.cam_emb(init_cam)
         # cam_prob = F.normalize(cam_feat, dim=1) @ F.normalize(self.cam_pred, dim=1).T
-        cam_prob = self.cam_pred(cam_feat)
+        cam_prob = 0. * self.cam_pred(cam_feat) + cam_emb
         if self.training:
             # gumbel softmax trick
             cam_prob = gumbel_softmax(cam_prob, dim=1, hard=hard, mask=cam_candidate)
@@ -130,8 +132,8 @@ class MVDet(nn.Module):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         if use_bottleneck:
-            # self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 1), nn.ReLU())
-            self.bottleneck = nn.Conv2d(base_dim, hidden_dim, 1)
+            self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 1), nn.ReLU())
+            # self.bottleneck = nn.Conv2d(base_dim, hidden_dim, 1)
             base_dim = hidden_dim
         else:
             self.bottleneck = nn.Identity()
@@ -145,13 +147,14 @@ class MVDet(nn.Module):
         # self.img_id = output_head(base_dim, outfeat_dim, len(dataset.pid_dict))
 
         # world feat
-        self.coord_map = create_coord_map(np.array(dataset.Rworld_shape))
-        self.world_feat = nn.Sequential(nn.Conv2d(base_dim + 2, hidden_dim, 3, padding=1), nn.ReLU(),
+        # self.coord_map = create_coord_map(np.array(dataset.Rworld_shape))
+        # self.world_feat_pre = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 1), nn.ReLU())
+        self.world_feat = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, padding=1), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=2, dilation=2), nn.ReLU(),
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
         # select camera based on initialization
-        self.cam_pred = CamPredModule(dataset.num_cam, hidden_dim)
+        self.cam_pred = CamPredModule(dataset.num_cam, hidden_dim, dataset.Rworld_shape)
 
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
@@ -223,25 +226,25 @@ class MVDet(nn.Module):
                 plt.imshow(visualize_img)
                 plt.show()
 
-        # world_feat = self.world_feat(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
+        # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
 
         if init_cam is not None:
             init_cam = init_cam.to(imgs.device)
             if self.training:
                 init_cam_feat = world_feat[init_cam[:, 0] * N + init_cam[:, 1]]
-                cam_candidate = keep_cams.view(B * N, 1)[init_cam[:, 0] * N + init_cam[:, 1]
-                                                         ].repeat(1, N).scatter(1, init_cam[:, [1]], 0)
-                cam_prob = self.cam_pred(init_cam[:, 1], init_cam_feat, cam_candidate, hard)
+                cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0)
+                cam_prob = self.cam_pred(init_cam[:, 1], init_cam_feat.detach(), cam_candidate, hard)
                 if self.aggregation == 'mean':
                     world_feat = torch.stack([(world_feat.view(B, N, C, H, W)[init_cam[:, 0]] *
                                                cam_prob.view(-1, N, 1, 1, 1)).sum(dim=1), init_cam_feat], dim=1)
                 else:
                     world_feat = world_feat.view(B, N, C, H, W)[init_cam[:, 0]] * \
                                  cam_prob.scatter(1, init_cam[:, [1]], 1)[:, :, None, None, None]
+                # world_feat = (torch.randn([], device=imgs.device) + world_feat) / 4
             else:
                 init_cam_feat = world_feat[init_cam + torch.arange(B, device=imgs.device) * N]
                 cam_candidate = keep_cams.scatter(1, init_cam[:, None], 0)
-                cam_prob = self.cam_pred(init_cam, init_cam_feat, cam_candidate)
+                cam_prob = self.cam_pred(init_cam, init_cam_feat.detach(), cam_candidate)
                 # cam_prob = cam_prob > 0
                 # distribution = torch.distributions.Categorical(cam_prob.view([B, N]))
                 # cam_selection = distribution.sample()
@@ -257,7 +260,7 @@ class MVDet(nn.Module):
             world_feat = world_feat.view(B, N, C, H, W)
             cam_prob = None
         world_feat = world_feat.mean(dim=1) if self.aggregation == 'mean' else world_feat.max(dim=1)[0]
-        world_feat = torch.cat([world_feat, self.coord_map.repeat([world_feat.shape[0], 1, 1, 1]).to(imgs.device)], 1)
+        # world_feat = torch.cat([world_feat, self.coord_map.repeat([world_feat.shape[0], 1, 1, 1]).to(imgs.device)], 1)
         world_feat = self.world_feat(world_feat)
 
         # world heads
@@ -280,17 +283,24 @@ class MVDet(nn.Module):
 def test():
     from multiview_detector.datasets.frameDataset import frameDataset
     from multiview_detector.datasets.Wildtrack import Wildtrack
+    from multiview_detector.datasets.MultiviewX import MultiviewX
     import torchvision.transforms as T
     from torch.utils.data import DataLoader
     from multiview_detector.utils.decode import ctdet_decode
 
     gumbel_softmax(torch.randn(2, 7))
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), train=False)
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='val')
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
     model = MVDet(dataset)
+    pretrained_dict = torch.load(
+        'logs/wildtrack/resnet18_max_lr0.0001base0.0other0.0select1.0_b1_e10_dropcam0.0_single_hard0_conf0.0even0.0_2022-10-03_15-42-34/MultiviewDetector.pth')
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
-    init_cam = torch.tensor([4, 0], dtype=torch.long)
-    keep_cams[0, 3] = 0
+    init_cam = torch.tensor([0, 3], dtype=torch.long)
+    # keep_cams[0, 3] = 0
     model.train()
     (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, keep_cams.nonzero(), keep_cams)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
