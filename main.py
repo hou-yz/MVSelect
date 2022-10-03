@@ -49,7 +49,7 @@ def main(args):
 
     # camera select module
     if args.select:
-        args.dropcam = 0.5
+        # args.dropcam = 0.5
         args.base_lr_ratio = 0.1 if args.base_lr_ratio is None else args.base_lr_ratio
         args.other_lr_ratio = 0.1 if args.other_lr_ratio is None else args.other_lr_ratio
         args.lr = 1e-4 if args.lr is None else args.lr
@@ -65,11 +65,14 @@ def main(args):
         base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
     else:
         raise Exception('must choose from [wildtrack, multiviewx]')
-    train_set = frameDataset(base, train=True, world_reduce=args.world_reduce,
+    train_set = frameDataset(base, split='train' if not args.select else 'trainval', world_reduce=args.world_reduce,
                              img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                             img_kernel_size=args.img_kernel_size, semi_supervised=args.semi_supervised,
+                             img_kernel_size=args.img_kernel_size,
                              dropout=args.dropcam, augmentation=args.augmentation)
-    test_set = frameDataset(base, train=False, world_reduce=args.world_reduce,
+    val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
+                           img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                           img_kernel_size=args.img_kernel_size)
+    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                             img_kernel_size=args.img_kernel_size)
 
@@ -80,6 +83,8 @@ def main(args):
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                               pin_memory=True, worker_init_fn=seed_worker)
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+                            pin_memory=True, worker_init_fn=seed_worker)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                              pin_memory=True, worker_init_fn=seed_worker)
 
@@ -127,12 +132,12 @@ def main(args):
                     "lr": args.lr * args.base_lr_ratio, },
                    {"params": [p for n, p in model.named_parameters() if 'cam_' in n and p.requires_grad],
                     "lr": args.lr * args.select_lr_ratio, }, ]
-    optimizer = optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     # optimizer_cam = optim.AdamW(model.cam_pred.parameters(), lr=args.lr * args.select_lr_ratio,
     #                             weight_decay=args.weight_decay)
 
-    def warmup_lr_scheduler(epoch, warmup_epochs=3):
+    def warmup_lr_scheduler(epoch, warmup_epochs=int(0.3 * args.epochs)):
         if epoch < warmup_epochs:
             return epoch / warmup_epochs
         else:
@@ -143,20 +148,20 @@ def main(args):
 
     trainer = PerspectiveTrainer(model, logdir, args)
 
-    def test_with_select(override=None):
+    def test_with_select(dataloader, override=None):
         t0 = time.time()
-        test_losses, modas = [], []
+        losses, modas = [], []
         for init_cam in np.arange(train_set.num_cam) if args.select or override is not None else [None]:
             print(f'init camera {init_cam}:')
             init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
-            test_loss, moda = trainer.test(None, test_loader, res_fpath, init_cam, override)
-            test_losses.append(test_loss)
+            loss, moda = trainer.test(None, dataloader, res_fpath, init_cam, override)
+            losses.append(loss)
             modas.append(moda)
-        test_loss, moda = np.average(test_losses), np.average(modas)
-        print(f'average moda: {moda:.2f}%, time: {time.time() - t0:.2f}')
+        loss, moda = np.average(losses), np.average(modas)
+        print(f'average moda: {moda:.2f}%, average loss: {loss:.6f}, time: {time.time() - t0:.2f}')
         if override is not None:
-            return modas
-        return test_loss, moda
+            return losses, modas
+        return loss, moda
 
     # draw curve
     x_epoch = []
@@ -170,54 +175,63 @@ def main(args):
     if args.resume is None:
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            # if not args.select:
             train_loss = trainer.train(epoch, train_loader, optimizer, scheduler, args.hard)
-            # else:
-            #     if args.base_lr_ratio or args.other_lr_ratio:
-            #         train_loss = trainer.train(epoch, train_loader, (optimizer_cam, optimizer),
-            #                                    (scheduler_cam, scheduler), (args.hard, True))
-            #     else:
-            #         train_loss = trainer.train(epoch, train_loader, optimizer_cam, scheduler_cam, args.hard)
+            if epoch % (args.epochs // 10) == 0:
+                print('Testing...')
+                test_loss, moda = test_with_select(test_loader)
 
-            # train_loss_cam = trainer.train(epoch, train_loader, optimizer_cam, scheduler_cam,
-            #                                args.hard) if args.select else 0
-            # train_loss = trainer.train(epoch, train_loader, optimizer, scheduler,
-            #                            True) if args.base_lr_ratio or args.other_lr_ratio else 0
-
-            print('Testing...')
-            test_loss, moda = test_with_select()
-
-            # draw & save
-            x_epoch.append(epoch)
-            train_loss_s.append(train_loss)
-            test_loss_s.append(test_loss)
-            test_moda_s.append(moda)
-            draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s, test_moda_s)
-            torch.save(model.state_dict(), os.path.join(logdir, 'MultiviewDetector.pth'))
+                # draw & save
+                x_epoch.append(epoch)
+                train_loss_s.append(train_loss)
+                test_loss_s.append(test_loss)
+                test_moda_s.append(moda)
+                draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s, test_moda_s)
+                torch.save(model.state_dict(), os.path.join(logdir, 'MultiviewDetector.pth'))
     else:
         model.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth'))
         model.eval()
     print('Test loaded model...')
     print(logdir)
     if not args.select:
-        modas = []
+        val_losses, test_losses = [], []
+        val_modas, test_modas = [], []
         for cam in range(train_set.num_cam):
-            modas.append(test_with_select(override=cam))
-        modas = np.array(modas)
-        best2cam, avg2cam = np.mean(np.max(modas, axis=1)), np.mean(modas)
-        print(' '.join(f'cam {np.argmax(modas[cam])} {np.max(modas[cam]):.2f} |' for cam in range(train_set.num_cam)))
-        print(f'best {best2cam:.2f}, average {avg2cam:.2f}')
+            val_loss, val_moda = test_with_select(val_loader, override=cam)
+            val_losses.append(val_loss)
+            val_modas.append(val_moda)
+            test_loss, test_moda = test_with_select(test_loader, override=cam)
+            test_losses.append(test_loss)
+            test_modas.append(test_moda)
+        val_losses, test_losses = np.array(val_losses), np.array(test_losses)
+        val_modas, test_modas = np.array(val_modas), np.array(test_modas)
+        loss_strategy = np.argmin(val_losses, axis=1)
+        loss_strategy_modas = test_modas[np.arange(train_set.num_cam), loss_strategy]
+        result_strategy = np.argmax(val_modas, axis=1)
+        result_strategy_modas = test_modas[np.arange(train_set.num_cam), result_strategy]
+        best2cam, avg2cam = np.mean(np.max(test_modas, axis=1)), np.mean(test_modas)
+        loss2cam = np.mean(loss_strategy_modas)
+        result2cam = np.mean(result_strategy_modas)
         _, moda = trainer.test(args.epochs, test_loader, res_fpath)
-        np.savetxt(f'{logdir}/modas_{moda:.2f}_best{best2cam:.2f}_avg{avg2cam:.2f}.txt', modas, '%.2f',
+        np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_losses, test_losses]), '%.2f')
+        fname = f'modas_{moda:.2f}_Lstrategy{loss2cam:.2f}_Rstrategy{result2cam:.2f}_theory{best2cam:.2f}.txt'
+        np.savetxt(f'{logdir}/{fname}',
+                   np.concatenate([val_modas, test_modas]), '%.2f',
                    header=f'loading checkpoint...\n'
-                          f'{logdir}',
-                   footer=' '.join(f'cam {np.argmax(modas[cam])} {np.max(modas[cam]):.2f} |'
+                          f'{logdir}\n'
+                          f'val / test',
+                   footer=f'\tloss strategy\n' +
+                          ' '.join(f'cam {loss_strategy[cam]} {loss_strategy_modas[cam]:.2f} |'
                                    for cam in range(train_set.num_cam)) + '\n' +
-                          f'2 best cam: {best2cam:.2f}, 2 average cam: {avg2cam:.2f}\n'
+                          f'\tresult strategy\n' +
+                          ' '.join(f'cam {result_strategy[cam]} {result_strategy_modas[cam]:.2f} |'
+                                   for cam in range(train_set.num_cam)) + '\n' +
+                          f'2 best cam: loss_strategy {loss2cam:.2f}, '
+                          f'result_strategy {result2cam:.2f}, theory {best2cam:.2f}\n'
                           f'all cam: {moda:.2f}')
+        with open(f'{logdir}/{fname}', 'r') as fp:
+            print(fp.read())
         if args.resume is None:
-            shutil.copyfile(f'{logdir}/modas_{moda:.2f}_best{best2cam:.2f}_avg{avg2cam:.2f}.txt',
-                            f'logs/{args.dataset}/{args.arch}_performance.txt')
+            shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
     else:
         trainer.test(args.epochs, test_loader, res_fpath)
