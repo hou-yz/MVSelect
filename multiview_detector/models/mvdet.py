@@ -68,6 +68,15 @@ def create_coord_map(img_size, with_r=False):
     return ret
 
 
+def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
+    position = torch.arange(L).unsqueeze(1) / L * 2 * np.pi
+    div_term = torch.exp(torch.arange(0, hidden_dim, 2) / hidden_dim * (-np.log(temperature)))
+    pe = torch.zeros(L, hidden_dim)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe
+
+
 class CamPredModule(nn.Module):
     def __init__(self, num_cam, hidden_dim, world_shape, aggregation):
         super().__init__()
@@ -75,8 +84,7 @@ class CamPredModule(nn.Module):
                                       nn.LayerNorm([hidden_dim, world_shape[0], world_shape[1]]), nn.ReLU(),
                                       nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1),
                                       nn.LayerNorm([hidden_dim, world_shape[0], world_shape[1]]), nn.ReLU())
-        self.cam_emb = nn.Embedding(num_cam, num_cam)
-        self.cam_emb.weight.data.fill_(0)
+        self.register_buffer('cam_emb', create_pos_embedding(num_cam))
         self.cam_pred = nn.Parameter(torch.zeros(num_cam, hidden_dim))
         # self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
         #                               nn.Linear(hidden_dim, num_cam, bias=False))
@@ -89,28 +97,20 @@ class CamPredModule(nn.Module):
             assert init_cam.shape[0] == B
             init_cam = torch.cat([torch.arange(B, device=init_cam.device)[:, None], init_cam[:, None]], dim=1)
         cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0)
-        cam_emb = self.cam_emb(init_cam[:, 1])
+        cam_emb = self.cam_emb[init_cam[:, 1]]
         init_feat = world_feat[init_cam[:, 0] * N + init_cam[:, 1]]
-        cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3])
+        cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3]) * 0 + cam_emb
         cam_prob = cam_feat @ self.cam_pred.T
         # cam_prob = self.cam_pred(cam_feat)
         if self.training:
             # gumbel softmax trick
-            cam_emb = gumbel_softmax(cam_emb, dim=1, hard=hard, mask=cam_candidate)
             cam_prob = gumbel_softmax(cam_prob, dim=1, hard=hard, mask=cam_candidate)
-            # cam_prob = cam_prob if np.random.random() < 0.5 else cam_emb
-
-            cam_prob = (cam_prob * 0.0 + cam_emb) / 1.0
         else:
-            cam_emb = masked_softmax(cam_emb, cam_candidate, dim=1)
             cam_prob = masked_softmax(cam_prob, cam_candidate, dim=1)
-
-            cam_prob = (cam_prob * 0.0 + cam_emb) / 1.0
-
             if override is None:
                 selected_cam = torch.argmax(cam_prob, dim=1)
             else:
-                selected_cam = torch.ones(cam_prob.shape[0], device=init_cam.device).long() * override
+                selected_cam = torch.ones(init_cam.shape[0], device=init_cam.device).long() * override
             cam_prob = torch.zeros_like(cam_prob).scatter_(1, selected_cam[:, None], 1.)
 
         select_feat = world_feat.view(B, N, C, H, W)[init_cam[:, 0]] * cam_prob[:, :, None, None, None]
@@ -289,6 +289,9 @@ def test():
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
+
+    pos_emb = create_pos_embedding(dataset.base.num_cam)
+
     model = MVDet(dataset)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     init_cam = torch.tensor([2, 4], dtype=torch.long)
