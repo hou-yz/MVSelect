@@ -65,11 +65,11 @@ def main(args):
         base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
     else:
         raise Exception('must choose from [wildtrack, multiviewx]')
-    train_set = frameDataset(base, split='train' if not args.select else 'trainval', world_reduce=args.world_reduce,
+    train_set = frameDataset(base, split='train', world_reduce=args.world_reduce,
                              img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                              img_kernel_size=args.img_kernel_size,
                              dropout=args.dropcam, augmentation=args.augmentation)
-    val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
+    val_set = frameDataset(base, split='train', world_reduce=args.world_reduce,
                            img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                            img_kernel_size=args.img_kernel_size)
     test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
@@ -89,7 +89,7 @@ def main(args):
                              pin_memory=True, worker_init_fn=seed_worker)
 
     # logging
-    if args.resume is None:
+    if args.resume is None or not args.eval:
         select_settings = f'single_hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}_'
         lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
                       f'select{args.select_lr_ratio}' if args.select else ''
@@ -125,6 +125,13 @@ def main(args):
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
 
+    if args.resume:
+        pretrained_dict = torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth')
+        model_dict = model.state_dict()
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'cam_' not in k}
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+
     param_dicts = [{"params": [p for n, p in model.named_parameters()
                                if 'base' not in n and 'cam_' not in n and p.requires_grad],
                     "lr": args.lr * args.other_lr_ratio, },
@@ -134,8 +141,8 @@ def main(args):
                     "lr": args.lr * args.select_lr_ratio, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    # optimizer_cam = optim.AdamW(model.cam_pred.parameters(), lr=args.lr * args.select_lr_ratio,
-    #                             weight_decay=args.weight_decay)
+    optimizer_cam = optim.Adam(model.cam_pred.parameters(), lr=args.lr * args.select_lr_ratio,
+                               weight_decay=args.weight_decay)
 
     def warmup_lr_scheduler(epoch, warmup_epochs=int(0.3 * args.epochs)):
         if epoch < warmup_epochs:
@@ -153,7 +160,7 @@ def main(args):
         losses, modas = [], []
         for init_cam in np.arange(train_set.num_cam) if args.select or override is not None else [None]:
             print(f'init camera {init_cam}:')
-            init_cam = torch.tensor([init_cam]).cuda() if init_cam is not None else None
+            init_cam = init_cam * torch.ones([args.batch_size]).long().cuda() if init_cam is not None else None
             loss, moda = trainer.test(None, dataloader, res_fpath, init_cam, override)
             losses.append(loss)
             modas.append(moda)
@@ -172,11 +179,20 @@ def main(args):
     # learn
     res_fpath = os.path.join(logdir, 'test.txt')
 
-    if args.resume is None:
+    if not args.eval:
+        # trainer.test(args.epochs, test_loader, res_fpath)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss = trainer.train(epoch, train_loader, optimizer, scheduler, args.hard)
-            if epoch % (args.epochs // 10) == 0:
+            if args.select and not (args.base_lr_ratio or args.base_lr_ratio):
+                model.eval()
+                model.cam_pred.train()
+                train_loss = trainer.train(epoch, train_loader, optimizer_cam,
+                                           hard=args.hard, identity_goal=epoch < 0)
+            else:
+                model.train()
+                train_loss = trainer.train(epoch, train_loader, optimizer, scheduler,
+                                           hard=args.hard, identity_goal=epoch < 0)
+            if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
                 test_loss, moda = test_with_select(test_loader)
 
@@ -187,12 +203,9 @@ def main(args):
                 test_moda_s.append(moda)
                 draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s, test_moda_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'MultiviewDetector.pth'))
-    else:
-        model.load_state_dict(torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth'))
-        model.eval()
     print('Test loaded model...')
     print(logdir)
-    if not args.select:
+    if not args.select and not args.eval:
         val_losses, test_losses = [], []
         val_modas, test_modas = [], []
         for cam in range(train_set.num_cam):
@@ -241,7 +254,7 @@ if __name__ == '__main__':
     # settings
     parser = argparse.ArgumentParser(description='Multiview detector')
     parser.add_argument('--reID', action='store_true')
-    parser.add_argument('--semi_supervised', type=float, default=0)
+    parser.add_argument('--eval', action='store_true', help='evaluation only')
     parser.add_argument('--id_ratio', type=float, default=0)
     parser.add_argument('--cls_thres', type=float, default=0.6)
     parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
