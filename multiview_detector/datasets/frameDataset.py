@@ -46,7 +46,7 @@ def get_gt(Rshape, x_s, y_s, w_s=None, h_s=None, v_s=None, reduce=4, top_k=100, 
 class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, img_reduce=12,
                  world_kernel_size=10, img_kernel_size=10,
-                 split_ratio=(0.5, 0.4, 0.1), top_k=100, force_download=True, dropout=0.0, augmentation=False):
+                 split_ratio=(0.9, 0.0, 0.1), top_k=100, force_download=True, dropout=0.0, augmentation=False):
         super().__init__(base.root)
 
         self.base = base
@@ -239,7 +239,7 @@ class frameDataset(VisionDataset):
         imgs_gt = {key: torch.stack([img_gt[key] for img_gt in imgs_gt]) for key in imgs_gt[0]}
         drop, keep_cams = np.random.rand() < self.dropout, torch.ones(self.num_cam, dtype=torch.bool)
         if drop:
-            num_drop = np.random.randint(self.num_cam // 2) + 1
+            num_drop = np.random.randint(self.num_cam - 1)
             drop_cams = np.random.choice(self.num_cam, num_drop, replace=False)
             for cam in drop_cams:
                 keep_cams[cam] = 0
