@@ -92,8 +92,13 @@ def main(args):
         val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=256, shuffle=False, num_workers=args.num_workers)
         print('num_train_files: '+str(len(train_dataset.filepaths)))
         print('num_val_files: '+str(len(val_dataset.filepaths)))
-        trainer = ModelNetTrainer_12(cnet, train_loader, val_loader, optimizer, 'svcnn', log_dir_stage_1, num_views=1)
-        trainer.train(args.epochs)
+        if 'modelnet40_12' in args.dataset:
+            trainer = ModelNetTrainer_12(cnet, train_loader, val_loader, optimizer, 'svcnn', log_dir_stage_1, num_views=1)
+        elif 'modelnet40_20' in args.dataset:
+            trainer = ModelNetTrainer_20(cnet, train_loader, val_loader, optimizer, 'svcnn', log_dir_stage_1, num_views=1)
+        # trainer.train(args.epochs)
+        for epoch in tqdm.tqdm(range(args.epochs)):
+            trainer.train(epoch)
         # cnet.load_state_dict(torch.load('./multiview_detector/model-00029.pth'))
         
         # STAGE 2
@@ -114,7 +119,9 @@ def main(args):
             optimizer = optim.SGD(cnet_2.parameters(), lr=args.lr, weight_decay=args.weight_decay,momentum=0.9)
             trainer = ModelNetTrainer_20(cnet_2, train_loader, val_loader, optimizer, 'view-gcn', log_dir_stage_2, num_views=args.num_views)
         del cnet
-        trainer.train(args.epochs) #!30
+        # trainer.train(args.epochs) #!30
+        for epoch in tqdm.tqdm(range(args.epochs)):
+            trainer.train(epoch)
 
     else:
         # camera select module
