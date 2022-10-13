@@ -60,6 +60,8 @@ def main(args):
                 print('WARNING: summary folder already exists!! It will be overwritten!!')
                 shutil.rmtree(log_dir)
                 os.mkdir(log_dir)
+        if not os.path.exists(f'logs'):
+            os.mkdir(f'logs')
         if not os.path.exists(f'logs/{args.dataset}'):
             os.mkdir(f'logs/{args.dataset}')
         log_dir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_' \
