@@ -18,14 +18,12 @@ class Entropy(nn.Module):
     def __init__(self):
         super(Entropy, self).__init__()
 
-    def forward(self, x, dim=-1):
-        x = F.softmax(x, dim=dim) * F.log_softmax(x, dim=dim)
-        x = -1.0 * x.mean()
-        return x
+    def forward(self, logits, dim=-1):
+        return -torch.sum(F.softmax(logits, dim=dim) * F.log_softmax(logits, dim=dim), dim=dim)
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=2, alpha=0.8):
+    def __init__(self, gamma=2, alpha=0.9):
         super(FocalLoss, self).__init__()
         self.gamma = gamma
         self.alpha = alpha
@@ -45,7 +43,7 @@ class FocalLoss(nn.Module):
 
         if self.alpha >= 0:
             pos_loss *= self.alpha
-            neg_loss *= 1 - self.alpha
+            neg_loss *= (1 - self.alpha)
 
         loss = -(pos_loss + neg_loss).sum() / max(1, is_positive.sum())
         return loss
