@@ -33,18 +33,6 @@ class MultiviewX(VisionDataset):
         self.intrinsic_matrices, self.extrinsic_matrices = zip(
             *[self.get_intrinsic_extrinsic_matrix(cam) for cam in range(self.num_cam)])
 
-    def get_image_fpaths(self, frame_range):
-        img_fpaths = {cam: {} for cam in range(self.num_cam)}
-        for camera_folder in sorted(os.listdir(os.path.join(self.root, 'Image_subsets'))):
-            cam = int(camera_folder[-1]) - 1
-            if cam >= self.num_cam:
-                continue
-            for fname in sorted(os.listdir(os.path.join(self.root, 'Image_subsets', camera_folder))):
-                frame = int(fname.split('.')[0])
-                if frame in frame_range:
-                    img_fpaths[cam][frame] = os.path.join(self.root, 'Image_subsets', camera_folder, fname)
-        return img_fpaths
-
     def get_worldgrid_from_pos(self, pos):
         grid_x = pos % 1000
         grid_y = pos // 1000
@@ -97,29 +85,12 @@ class MultiviewX(VisionDataset):
 
         return intrinsic_matrix, extrinsic_matrix
 
-    def read_pom(self):
-        bbox_by_pos_cam = {}
-        cam_pos_pattern = re.compile(r'(\d+) (\d+)')
-        cam_pos_bbox_pattern = re.compile(r'(\d+) (\d+) ([-\d]+) ([-\d]+) (\d+) (\d+)')
-        with open(os.path.join(self.root, 'rectangles.pom'), 'r') as fp:
-            for line in fp:
-                if 'RECTANGLE' in line:
-                    cam, pos = map(int, cam_pos_pattern.search(line).groups())
-                    if pos not in bbox_by_pos_cam:
-                        bbox_by_pos_cam[pos] = {}
-                    if 'notvisible' in line:
-                        bbox_by_pos_cam[pos][cam] = None
-                    else:
-                        cam, pos, left, top, right, bottom = map(int, cam_pos_bbox_pattern.search(line).groups())
-                        bbox_by_pos_cam[pos][cam] = [max(left, 0), max(top, 0),
-                                                     min(right, 1920 - 1), min(bottom, 1080 - 1)]
-        return bbox_by_pos_cam
-
 
 def test():
     from multiview_detector.utils.projection import get_worldcoord_from_imagecoord
+    from multiview_detector.datasets.frameDataset import read_pom
     dataset = MultiviewX(os.path.expanduser('~/Data/MultiviewX'), )
-    pom = dataset.read_pom()
+    pom = read_pom(dataset.root)
 
     for cam in range(dataset.num_cam):
         head_errors, foot_errors = [], []

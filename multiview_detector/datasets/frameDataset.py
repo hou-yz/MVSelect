@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 from operator import itemgetter
@@ -43,10 +44,29 @@ def get_gt(Rshape, x_s, y_s, w_s=None, h_s=None, v_s=None, reduce=4, top_k=100, 
     return ret
 
 
+def read_pom(root):
+    bbox_by_pos_cam = {}
+    cam_pos_pattern = re.compile(r'(\d+) (\d+)')
+    cam_pos_bbox_pattern = re.compile(r'(\d+) (\d+) ([-\d]+) ([-\d]+) (\d+) (\d+)')
+    with open(os.path.join(root, 'rectangles.pom'), 'r') as fp:
+        for line in fp:
+            if 'RECTANGLE' in line:
+                cam, pos = map(int, cam_pos_pattern.search(line).groups())
+                if pos not in bbox_by_pos_cam:
+                    bbox_by_pos_cam[pos] = {}
+                if 'notvisible' in line:
+                    bbox_by_pos_cam[pos][cam] = None
+                else:
+                    cam, pos, left, top, right, bottom = map(int, cam_pos_bbox_pattern.search(line).groups())
+                    bbox_by_pos_cam[pos][cam] = [max(left, 0), max(top, 0),
+                                                 min(right, 1920 - 1), min(bottom, 1080 - 1)]
+    return bbox_by_pos_cam
+
+
 class frameDataset(VisionDataset):
     def __init__(self, base, split='train', reID=False, world_reduce=4, img_reduce=12,
                  world_kernel_size=10, img_kernel_size=10,
-                 split_ratio=(0.9, 0.0, 0.1), top_k=100, force_download=True, dropout=0.0, augmentation=False):
+                 split_ratio=(0.8, 0.1, 0.1), top_k=100, force_download=True, dropout=0.0, augmentation=False):
         super().__init__(base.root)
 
         self.base = base
@@ -85,7 +105,26 @@ class frameDataset(VisionDataset):
                                             align_corners=False)
         self.Rworld_coverage = self.get_world_coverage().bool()
 
-        self.img_fpaths = self.base.get_image_fpaths(frame_range)
+        self.get_image_fpaths(frame_range)
+        self.get_gt_targets(split if split == 'trainval' else f'{split}\t', frame_range)
+        # gt in mot format for evaluation
+        self.gt_fpath = os.path.join(self.root, 'gt.txt')
+        if not os.path.exists(self.gt_fpath) or force_download:
+            self.prepare_gt()
+        pass
+
+    def get_image_fpaths(self, frame_range):
+        self.img_fpaths = {cam: {} for cam in range(self.num_cam)}
+        for camera_folder in sorted(os.listdir(os.path.join(self.root, 'Image_subsets'))):
+            cam = int(camera_folder[-1]) - 1
+            if cam >= self.num_cam:
+                continue
+            for fname in sorted(os.listdir(os.path.join(self.root, 'Image_subsets', camera_folder))):
+                frame = int(fname.split('.')[0])
+                if frame in frame_range:
+                    self.img_fpaths[cam][frame] = os.path.join(self.root, 'Image_subsets', camera_folder, fname)
+
+    def get_gt_targets(self, split, frame_range):
         self.world_gt = {}
         self.imgs_gt = {}
         self.pid_dict = {}
@@ -120,18 +159,11 @@ class frameDataset(VisionDataset):
                     # x1y1x2y2
                     self.imgs_gt[frame][cam] = (np.array(img_bboxs[cam]), np.array(img_pids[cam]))
 
-        print(f'{split}:\t\t pid: {len(self.pid_dict)}, frame: {num_frame}\n'
-              f'recorded: world bbox: {num_world_bbox / num_frame:.1f}, '
+        print(f'{split}:\t pid: {len(self.pid_dict)}, frame: {num_frame}, '
+              f'world bbox: {num_world_bbox / num_frame:.1f}, '
               f'imgs bbox per cam: {num_imgs_bbox / num_frame / self.num_cam:.1f}')
-        # gt in mot format for evaluation
-        self.gt_fpath = os.path.join(self.root, 'gt.txt')
-        if not os.path.exists(self.gt_fpath) or force_download:
-            self.prepare_gt()
-
-        pass
 
     def get_world_coverage(self):
-
         # world grid change to xy indexing
         world_zoom_mat = np.diag([self.world_reduce, self.world_reduce, 1])
         Rworldgrid_from_worldcoord_mat = np.linalg.inv(
