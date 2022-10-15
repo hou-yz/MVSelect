@@ -50,9 +50,9 @@ def main(args):
     # camera select module
     if args.select:
         # args.dropcam = 0.5
-        args.base_lr_ratio = 0.1 if args.base_lr_ratio is None else args.base_lr_ratio
-        args.other_lr_ratio = 0.1 if args.other_lr_ratio is None else args.other_lr_ratio
-        args.lr = 1e-4 if args.lr is None else args.lr
+        args.base_lr_ratio = 1.0 if args.base_lr_ratio is None else args.base_lr_ratio
+        args.other_lr_ratio = 1.0 if args.other_lr_ratio is None else args.other_lr_ratio
+        args.lr = 5e-4 if args.lr is None else args.lr
     else:
         args.lr = 5e-4 if args.lr is None else args.lr
         args.base_lr_ratio = 1.0 if args.base_lr_ratio is None else args.base_lr_ratio
@@ -65,11 +65,11 @@ def main(args):
         base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
     else:
         raise Exception('must choose from [wildtrack, multiviewx]')
-    train_set = frameDataset(base, split='train', world_reduce=args.world_reduce,
+    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
                              img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                              img_kernel_size=args.img_kernel_size,
                              dropout=args.dropcam, augmentation=args.augmentation)
-    val_set = frameDataset(base, split='train', world_reduce=args.world_reduce,
+    val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
                            img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                            img_kernel_size=args.img_kernel_size)
     test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
@@ -90,7 +90,7 @@ def main(args):
 
     # logging
     if args.resume is None or not args.eval:
-        select_settings = f'single_hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}_'
+        select_settings = f'hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}cover{args.beta_coverage}_'
         lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
                       f'select{args.select_lr_ratio}' if args.select else ''
         logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
@@ -155,17 +155,17 @@ def main(args):
 
     trainer = PerspectiveTrainer(model, logdir, args)
 
-    def test_with_select(dataloader, override=None):
+    def test_with_select(dataloader, override=None, result_type='moda'):
         t0 = time.time()
         losses, modas = [], []
         for init_cam in np.arange(train_set.num_cam) if args.select or override is not None else [None]:
             print(f'init camera {init_cam}:')
             init_cam = init_cam * torch.ones([args.batch_size]).long().cuda() if init_cam is not None else None
-            loss, moda = trainer.test(None, dataloader, res_fpath, init_cam, override)
+            loss, moda = trainer.test(dataloader, init_cam, override)
             losses.append(loss)
             modas.append(moda)
         loss, moda = np.average(losses), np.average(modas)
-        print(f'average moda: {moda:.2f}%, average loss: {loss:.6f}, time: {time.time() - t0:.2f}')
+        print(f'average {result_type}: {moda:.1f}%, average loss: {loss:.6f}, time: {time.time() - t0:.1f}')
         if override is not None:
             return losses, modas
         return loss, moda
@@ -177,8 +177,6 @@ def main(args):
     test_moda_s = []
 
     # learn
-    res_fpath = os.path.join(logdir, 'test.txt')
-
     if not args.eval:
         # trainer.test(args.epochs, test_loader, res_fpath)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
@@ -201,53 +199,57 @@ def main(args):
                 train_loss_s.append(train_loss)
                 test_loss_s.append(test_loss)
                 test_moda_s.append(moda)
-                draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s, test_moda_s)
+                draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
+                           test_result=test_moda_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'MultiviewDetector.pth'))
     print('Test loaded model...')
     print(logdir)
-    if not args.select and not args.eval:
-        val_losses, test_losses = [], []
-        val_modas, test_modas = [], []
+
+    def log_best2cam_strategy(result_type='moda'):
+        val_losses, val_modas = [], []
+        test_losses, test_modas = [], []
         for cam in range(train_set.num_cam):
-            val_loss, val_moda = test_with_select(val_loader, override=cam)
+            val_loss, val_moda = test_with_select(val_loader, override=cam, result_type=result_type)
             val_losses.append(val_loss)
             val_modas.append(val_moda)
-            test_loss, test_moda = test_with_select(test_loader, override=cam)
+            test_loss, test_moda = test_with_select(test_loader, override=cam, result_type=result_type)
             test_losses.append(test_loss)
             test_modas.append(test_moda)
-        val_losses, test_losses = np.array(val_losses), np.array(test_losses)
-        val_modas, test_modas = np.array(val_modas), np.array(test_modas)
+        val_losses, val_modas = np.array(val_losses), np.array(val_modas)
+        test_losses, test_modas = np.array(test_losses), np.array(test_modas)
         loss_strategy = np.argmin(val_losses, axis=1)
         loss_strategy_modas = test_modas[np.arange(train_set.num_cam), loss_strategy]
+        loss2cam = np.mean(loss_strategy_modas)
         result_strategy = np.argmax(val_modas, axis=1)
         result_strategy_modas = test_modas[np.arange(train_set.num_cam), result_strategy]
-        best2cam, avg2cam = np.mean(np.max(test_modas, axis=1)), np.mean(test_modas)
-        loss2cam = np.mean(loss_strategy_modas)
         result2cam = np.mean(result_strategy_modas)
-        _, moda = trainer.test(args.epochs, test_loader, res_fpath)
+        best2cam, avg2cam = np.mean(np.max(test_modas, axis=1)), np.mean(test_modas)
+        _, moda = trainer.test(test_loader)
         np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_losses, test_losses]), '%.2f')
-        fname = f'modas_{moda:.2f}_Lstrategy{loss2cam:.2f}_Rstrategy{result2cam:.2f}_theory{best2cam:.2f}.txt'
+        fname = f'{result_type}s_{moda:.1f}_Lstrategy{loss2cam:.1f}_Rstrategy{result2cam:.1f}_theory{best2cam:.1f}.txt'
         np.savetxt(f'{logdir}/{fname}',
-                   np.concatenate([val_modas, test_modas]), '%.2f',
+                   np.concatenate([val_modas, test_modas]), '%.1f',
                    header=f'loading checkpoint...\n'
                           f'{logdir}\n'
                           f'val / test',
                    footer=f'\tloss strategy\n' +
-                          ' '.join(f'cam {loss_strategy[cam]} {loss_strategy_modas[cam]:.2f} |'
+                          ' '.join(f'cam {loss_strategy[cam]} {loss_strategy_modas[cam]:.1f} |'
                                    for cam in range(train_set.num_cam)) + '\n' +
                           f'\tresult strategy\n' +
-                          ' '.join(f'cam {result_strategy[cam]} {result_strategy_modas[cam]:.2f} |'
+                          ' '.join(f'cam {result_strategy[cam]} {result_strategy_modas[cam]:.1f} |'
                                    for cam in range(train_set.num_cam)) + '\n' +
-                          f'2 best cam: loss_strategy {loss2cam:.2f}, '
-                          f'result_strategy {result2cam:.2f}, theory {best2cam:.2f}\n'
-                          f'all cam: {moda:.2f}')
+                          f'2 best cam: loss_strategy {loss2cam:.1f}, '
+                          f'result_strategy {result2cam:.1f}, theory {best2cam:.1f}\n'
+                          f'all cam: {moda:.1f}')
         with open(f'{logdir}/{fname}', 'r') as fp:
             print(fp.read())
         if args.resume is None:
             shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
+    if not args.select and not args.eval:
+        log_best2cam_strategy()
     else:
-        trainer.test(args.epochs, test_loader, res_fpath)
+        trainer.test(test_loader)
 
 
 if __name__ == '__main__':
@@ -263,8 +265,7 @@ if __name__ == '__main__':
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack', choices=['wildtrack', 'multiviewx'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
-    parser.add_argument('-b', '--batch_size', type=int, default=1, help='input batch size for training')
-    # parser.add_argument('--dropout', type=float, default=0.0)
+    parser.add_argument('-b', '--batch_size', type=int, default=2, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=None, help='learning rate')
@@ -290,6 +291,7 @@ if __name__ == '__main__':
     parser.add_argument('--hard', type=str2bool, default=False)
     parser.add_argument('--beta_conf', type=float, default=0.0)
     parser.add_argument('--beta_even', type=float, default=0.0)
+    parser.add_argument('--beta_coverage', type=float, default=0.1)
 
     args = parser.parse_args()
 

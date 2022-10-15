@@ -80,7 +80,8 @@ class PerspectiveTrainer(BaseTrainer):
                 H, W = dataloader.dataset.Rworld_shape
                 coverages = ((softmax_to_hard(cam_prob) @ Rworld_coverage.view(N, -1).float()).view(-1, 1, H, W) +
                              Rworld_coverage[init_cam[:, 1]].cuda()).clamp(0, 1)
-                loss = self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) - 0.1 * coverages.mean()
+                loss = self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) - \
+                       self.args.beta_coverage * coverages.mean()  # if self.args.beta_coverage else loss_w_hm
                 if init_cam is not None:
                     cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0).cuda()
 
@@ -127,7 +128,7 @@ class PerspectiveTrainer(BaseTrainer):
             del reg_conf, reg_even
         return losses / len(dataloader)
 
-    def test(self, epoch, dataloader, res_fpath=None, init_cam=None, override=None, visualize=False):
+    def test(self, dataloader, init_cam=None, override=None, visualize=False):
         self.model.eval()
         losses = 0
         res_list = []
@@ -150,22 +151,19 @@ class PerspectiveTrainer(BaseTrainer):
 
             losses += loss.item()
 
-            if res_fpath is not None:
-                xys = mvdet_decode(torch.sigmoid(world_heatmap.detach().cpu()), world_offset.detach().cpu(),
-                                   reduce=dataloader.dataset.world_reduce)
-                # xys = mvdet_decode(world_heatmap.detach().cpu(), reduce=dataloader.dataset.world_reduce)
-                grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
-                if dataloader.dataset.base.indexing == 'xy':
-                    positions = grid_xy
-                else:
-                    positions = grid_xy[:, :, [1, 0]]
-
-                for b in range(B):
-                    ids = scores[b].squeeze() > self.args.cls_thres
-                    pos, s = positions[b, ids], scores[b, ids, 0]
-                    ids, count = nms(pos, s, 20, np.inf)
-                    res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
-                    res_list.append(res)
+            xys = mvdet_decode(torch.sigmoid(world_heatmap.detach().cpu()), world_offset.detach().cpu(),
+                               reduce=dataloader.dataset.world_reduce)
+            grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
+            if dataloader.dataset.base.indexing == 'xy':
+                positions = grid_xy
+            else:
+                positions = grid_xy[:, :, [1, 0]]
+            for b in range(B):
+                ids = scores[b].squeeze() > self.args.cls_thres
+                pos, s = positions[b, ids], scores[b, ids, 0]
+                ids, count = nms(pos, s, 20, np.inf)
+                res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
+                res_list.append(res)
 
         if init_cam is not None:
             unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
@@ -179,7 +177,7 @@ class PerspectiveTrainer(BaseTrainer):
             subplt1 = fig.add_subplot(212, title="target")
             subplt0.imshow(world_heatmap.cpu().detach().numpy().squeeze())
             subplt1.imshow(world_gt['heatmap'].squeeze())
-            plt.savefig(os.path.join(self.logdir, f'world{epoch if epoch else ""}.jpg'))
+            plt.savefig(os.path.join(self.logdir, f'world.jpg'))
             plt.close(fig)
             # visualizing the heatmap for per-view estimation
             heatmap0_foot = imgs_heatmap[0].detach().cpu().numpy().squeeze()
@@ -188,15 +186,12 @@ class PerspectiveTrainer(BaseTrainer):
             foot_cam_result = add_heatmap_to_image(heatmap0_foot, img0)
             foot_cam_result.save(os.path.join(self.logdir, 'cam1_foot.jpg'))
 
-        if res_fpath is not None:
-            res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
-            np.savetxt(res_fpath, res_list, '%d')
-            recall, precision, moda, modp = evaluate(os.path.abspath(res_fpath),
-                                                     os.path.abspath(dataloader.dataset.gt_fpath),
-                                                     dataloader.dataset.base.__name__)
-            print(f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%')
-        else:
-            moda = 0
+        res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
+        np.savetxt(f'{self.logdir}/test.txt', res_list, '%d')
+        recall, precision, moda, modp = evaluate(os.path.abspath(f'{self.logdir}/test.txt'),
+                                                 os.path.abspath(dataloader.dataset.gt_fpath),
+                                                 dataloader.dataset.base.__name__)
+        print(f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%')
 
         # print(f'Test, loss: {losses / len(dataloader):.6f}, Time: {t_epoch:.3f}')
 
