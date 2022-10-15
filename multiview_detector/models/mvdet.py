@@ -77,16 +77,16 @@ def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
 
 
 class CamPredModule(nn.Module):
-    def __init__(self, num_cam, hidden_dim, world_shape):
+    def __init__(self, num_cam, hidden_dim):
         super().__init__()
-        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1),
-                                      nn.LayerNorm([hidden_dim, world_shape[0], world_shape[1]]), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1),
-                                      nn.LayerNorm([hidden_dim, world_shape[0], world_shape[1]]), nn.Tanh())
+        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), )
+        self.cam_feat[-1].weight.data.fill_(0)
+        self.cam_feat[-1].bias.data.fill_(0)
         self.register_buffer('cam_emb', create_pos_embedding(num_cam))
         # self.cam_pred = nn.Embedding(num_cam, num_cam)
         # self.cam_pred.weight.data.fill_(0)
-        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
+        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
                                       nn.Linear(hidden_dim, num_cam, bias=False))
         self.cam_pred[-1].weight.data.fill_(0)
 
@@ -99,10 +99,11 @@ class CamPredModule(nn.Module):
         cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0)
         cam_emb = self.cam_emb[init_cam[:, 1]]
         init_feat = world_feat[init_cam[:, 0] * N + init_cam[:, 1]]
-        cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3]) * 0.1 + cam_emb
+        cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3]) + cam_emb
         logits = self.cam_pred(cam_feat)
         # logits = self.cam_pred(init_cam[:, 1])
         if self.training:
+            assert hard is True or hard is False, 'plz provide bool type {hard}'
             # gumbel softmax trick
             cam_prob = gumbel_softmax(logits, dim=1, mask=cam_candidate)
             cam_prob_hard = softmax_to_hard(cam_prob)
@@ -115,7 +116,7 @@ class CamPredModule(nn.Module):
             cam_prob_hard = torch.zeros_like(cam_prob).scatter_(1, selected_cam[:, None], 1.)
 
         select_feat = world_feat.view(B, N, C, H, W)[init_cam[:, 0]] * \
-                      (cam_prob_hard if hard or not self.training else cam_prob)[:, :, None, None, None]
+                      (cam_prob_hard if hard is True or not self.training else cam_prob)[:, :, None, None, None]
         world_feat = torch.stack([init_feat, select_feat.sum(dim=1)], dim=1)
         return world_feat, (logits, cam_prob if self.training else cam_prob_hard)
 
@@ -157,8 +158,7 @@ class MVDet(nn.Module):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         if use_bottleneck:
-            self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 1), nn.ReLU())
-            # self.bottleneck = nn.Conv2d(base_dim, hidden_dim, 1)
+            self.bottleneck = nn.Conv2d(base_dim, hidden_dim, 1)
             base_dim = hidden_dim
         else:
             self.bottleneck = nn.Identity()
@@ -179,7 +179,7 @@ class MVDet(nn.Module):
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
         # select camera based on initialization
-        self.cam_pred = CamPredModule(dataset.num_cam, hidden_dim, dataset.Rworld_shape)
+        self.cam_pred = CamPredModule(dataset.num_cam, hidden_dim)
 
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
@@ -290,8 +290,6 @@ def test():
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
-
-    pos_emb = create_pos_embedding(dataset.base.num_cam)
 
     model = MVDet(dataset)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
