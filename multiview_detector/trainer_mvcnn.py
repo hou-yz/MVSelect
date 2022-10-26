@@ -7,10 +7,6 @@ from torch import nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
-from multiview_detector.loss import *
-from multiview_detector.evaluation.evaluate import evaluate
-from multiview_detector.utils.decode import ctdet_decode, mvdet_decode
-from multiview_detector.utils.nms import nms
 from multiview_detector.utils.meters import AverageMeter
 from multiview_detector.utils.image_utils import add_heatmap_to_image, img_color_denormalize
 from multiview_detector.models.mvdet import softmax_to_hard, masked_softmax
@@ -25,8 +21,10 @@ class ClassifierTrainer(object):
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, identity_goal=False, log_interval=100):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, identity_goal=False, log_interval=200):
         self.model.train()
+        if self.args.base_lr_ratio == 0:
+            self.model.base.eval()
         losses, correct, miss = 0, 0, 1e-8
         t0 = time.time()
         cam_prob_sum = torch.zeros([dataloader.dataset.num_cam])
@@ -85,7 +83,7 @@ class ClassifierTrainer(object):
                 t1 = time.time()
                 t_epoch = t1 - t0
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, '
-                      f'loss: {losses / (batch_idx + 1):.6f}, prec: {100. * correct / (correct + miss):.1f}%'
+                      f'loss: {losses / (batch_idx + 1):.6f}, prec: {100. * correct / (correct + miss):.1f}%, '
                       f'Time: {t_epoch:.1f}' + (f', prob: {cam_prob.detach().max(dim=1)[0].mean().item():.3f}'
                                                 if self.args.select and init_cam is not None else ''))
                 if self.args.select:
@@ -120,7 +118,7 @@ class ClassifierTrainer(object):
 
         if init_cam is not None:
             unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
-            print(' '.join('cam {} {} |'.format(cam, freq) for cam, freq in
+            print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                            zip(unique_cams, unique_freq / len(selected_cams))))
 
         print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%, ')

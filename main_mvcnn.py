@@ -54,7 +54,7 @@ def main(args):
     else:
         raise Exception
     train_set = imgDataset(fpath, num_cam, mode='multi', split='train', )
-    val_set = imgDataset(fpath, num_cam, mode='multi', split='train', )
+    val_set = imgDataset(fpath, num_cam, mode='multi', split='train', per_cls_instances=25)
     test_set = imgDataset(fpath, num_cam, mode='multi', split='test', )
 
     def seed_worker(worker_id):
@@ -72,8 +72,10 @@ def main(args):
     # logging
     if args.resume is None or not args.eval:
         select_settings = f'hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}_'
+        lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
+                      f'select{args.select_lr_ratio}' if args.select else ''
         logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
-                 f'lr{args.lr}_b{args.batch_size}_e{args.epochs}_' \
+                 f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
                  f'{select_settings if args.select else ""}' \
                  f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
@@ -120,19 +122,26 @@ def main(args):
                     "lr": args.lr * args.select_lr_ratio, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
+    def warmup_lr_scheduler(epoch, warmup_epochs=int(0.3 * args.epochs)):
+        if epoch < warmup_epochs:
+            return epoch / warmup_epochs
+        else:
+            return (np.cos((epoch - warmup_epochs) / (args.epochs - warmup_epochs) * np.pi) + 1) / 2
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
+
     trainer = ClassifierTrainer(model, logdir, args)
 
-    def test_with_select(dataloader, override=None):
+    def test_with_select(dataloader, override=None, result_type='prec'):
         t0 = time.time()
         losses, precs = [], []
-        for init_cam in np.arange(train_set.num_cam) if args.select or override is not None else [None]:
+        for init_cam in range(train_set.num_cam) if args.select or override is not None else [None]:
             print(f'init camera {init_cam}:')
-            init_cam = init_cam * torch.ones([args.batch_size]).long().cuda() if init_cam is not None else None
             loss, prec = trainer.test(dataloader, init_cam, override)
             losses.append(loss)
             precs.append(prec)
         loss, prec = np.average(losses), np.average(precs)
-        print(f'average prec: {prec:.2f}%, average loss: {loss:.6f}, time: {time.time() - t0:.2f}')
+        print(f'average {result_type}: {prec:.1f}%, average loss: {loss:.6f}, time: {time.time() - t0:.1f}')
         if override is not None:
             return losses, precs
         return loss, prec
@@ -149,8 +158,7 @@ def main(args):
         # trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            model.train()
-            train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, hard=args.hard, )
+            train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler, hard=args.hard, )
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
                 test_loss, test_prec = test_with_select(test_loader)
@@ -166,14 +174,15 @@ def main(args):
                 torch.save(model.state_dict(), os.path.join(logdir, 'MVCNN.pth'))
     print('Test loaded model...')
     print(logdir)
-    if not args.select and not args.eval:
+
+    def log_best2cam_strategy(result_type='prec'):
         val_losses, val_precs = [], []
         test_losses, test_precs = [], []
         for cam in range(train_set.num_cam):
-            val_loss, val_prec = test_with_select(val_loader, override=cam)
+            val_loss, val_prec = test_with_select(val_loader, override=cam, result_type=result_type)
             val_losses.append(val_loss)
             val_precs.append(val_prec)
-            test_loss, test_prec = test_with_select(test_loader, override=cam)
+            test_loss, test_prec = test_with_select(test_loader, override=cam, result_type=result_type)
             test_losses.append(test_loss)
             test_precs.append(test_prec)
         val_losses, val_precs = np.array(val_losses), np.array(val_precs)
@@ -184,31 +193,38 @@ def main(args):
         result_strategy = np.argmax(val_precs, axis=1)
         result_strategy_precs = test_precs[np.arange(train_set.num_cam), result_strategy]
         result2cam = np.mean(result_strategy_precs)
-        best2cam, avg2cam = np.mean(np.max(test_precs, axis=1)), np.mean(test_precs)
-        _, prec = trainer.test(test_loader, )
+        theory_strategy = np.argmax(test_precs, axis=1)
+        theory_strategy_precs = test_precs[np.arange(train_set.num_cam), theory_strategy]
+        best2cam = np.mean(theory_strategy_precs)
+        _, prec = trainer.test(test_loader)
         np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_losses, test_losses]), '%.2f')
-        fname = f'precs_{prec:.2f}_Lstrategy{loss2cam:.2f}_Rstrategy{result2cam:.2f}_theory{best2cam:.2f}.txt'
+        fname = f'{result_type}s_{prec:.1f}_Lstrategy{loss2cam:.1f}_Rstrategy{result2cam:.1f}_theory{best2cam:.1f}.txt'
         np.savetxt(f'{logdir}/{fname}',
-                   np.concatenate([val_precs, test_precs]), '%.2f',
+                   np.concatenate([val_precs, test_precs]), '%.1f',
                    header=f'loading checkpoint...\n'
                           f'{logdir}\n'
                           f'val / test',
                    footer=f'\tloss strategy\n' +
-                          ' '.join(f'cam {loss_strategy[cam]} {loss_strategy_precs[cam]:.2f} |'
+                          ' '.join(f'cam {loss_strategy[cam]} {loss_strategy_precs[cam]:.1f} |'
                                    for cam in range(train_set.num_cam)) + '\n' +
                           f'\tresult strategy\n' +
-                          ' '.join(f'cam {result_strategy[cam]} {result_strategy_precs[cam]:.2f} |'
+                          ' '.join(f'cam {result_strategy[cam]} {result_strategy_precs[cam]:.1f} |'
                                    for cam in range(train_set.num_cam)) + '\n' +
-                          f'2 best cam: loss_strategy {loss2cam:.2f}, '
-                          f'result_strategy {result2cam:.2f}, theory {best2cam:.2f}\n'
-                          f'all cam: {prec:.2f}')
+                          f'\ttheory\n' +
+                          ' '.join(f'cam {theory_strategy[cam]} {theory_strategy_precs[cam]:.1f} |'
+                                   for cam in range(train_set.num_cam)) + '\n' +
+                          f'2 best cam: loss_strategy {loss2cam:.1f}, '
+                          f'result_strategy {result2cam:.1f}, theory {best2cam:.1f}\n'
+                          f'all cam: {prec:.1f}')
         with open(f'{logdir}/{fname}', 'r') as fp:
             print(fp.read())
         if args.resume is None:
             shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
+    if not args.select and not args.eval:
+        log_best2cam_strategy()
     else:
-        trainer.test(test_loader, )
+        trainer.test(test_loader)
 
 
 if __name__ == '__main__':
@@ -219,9 +235,9 @@ if __name__ == '__main__':
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='modelnet40_12')
     parser.add_argument('-j', '--num_workers', type=int, default=4)
-    parser.add_argument('-b', '--batch_size', type=int, default=8, help='input batch size for training')
+    parser.add_argument('-b', '--batch_size', type=int, default=16, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
-    parser.add_argument('--epochs', type=int, default=30, help='number of epochs to train')
+    parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=5e-5, help='learning rate')
     parser.add_argument('--base_lr_ratio', type=float, default=1.0)
     parser.add_argument('--select_lr_ratio', type=float, default=1.0)
@@ -229,14 +245,13 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--visualize', action='store_true')
-    parser.add_argument('--seed', type=int, default=2021, help='random seed')
+    parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     parser.add_argument('--select', type=str2bool, default=False)
 
     parser.add_argument('--hard', type=str2bool, default=False)
     parser.add_argument('--beta_conf', type=float, default=0.0)
     parser.add_argument('--beta_even', type=float, default=0.0)
-    parser.add_argument('--beta_coverage', type=float, default=0.1)
 
     args = parser.parse_args()
 

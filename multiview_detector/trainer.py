@@ -16,14 +16,9 @@ from multiview_detector.utils.image_utils import add_heatmap_to_image, img_color
 from multiview_detector.models.mvdet import softmax_to_hard, masked_softmax
 
 
-class BaseTrainer(object):
-    def __init__(self):
-        super(BaseTrainer, self).__init__()
-
-
-class PerspectiveTrainer(BaseTrainer):
+class PerspectiveTrainer(object):
     def __init__(self, model, logdir, args, ):
-        super(BaseTrainer, self).__init__()
+        super(PerspectiveTrainer, self).__init__()
         self.model = model
         self.args = args
         self.mse_loss = nn.MSELoss()
@@ -35,7 +30,9 @@ class PerspectiveTrainer(BaseTrainer):
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, identity_goal=False, log_interval=100):
-        # self.model.train()
+        self.model.train()
+        if self.args.base_lr_ratio == 0:
+            self.model.base.eval()
         losses = 0
         t0 = time.time()
         cam_prob_sum = torch.zeros([dataloader.dataset.num_cam])
@@ -167,7 +164,7 @@ class PerspectiveTrainer(BaseTrainer):
 
         if init_cam is not None:
             unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
-            print(' '.join('cam {} {} |'.format(cam, freq) for cam, freq in
+            print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                            zip(unique_cams, unique_freq / len(selected_cams))))
 
         if visualize:
