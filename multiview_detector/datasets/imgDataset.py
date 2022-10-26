@@ -16,7 +16,7 @@ class imgDataset(VisionDataset):
                   'person', 'piano', 'plant', 'radio', 'range_hood', 'sink', 'sofa', 'stairs',
                   'stool', 'table', 'tent', 'toilet', 'tv_stand', 'vase', 'wardrobe', 'xbox']
 
-    def __init__(self, root, num_cam, mode='multi', split='train', num_model_instances=0, dropout=0.0):
+    def __init__(self, root, num_cam, mode='multi', split='train', per_cls_instances=0, dropout=0.0):
         super().__init__(root)
         self.num_cam, self.num_class = num_cam, len(self.classnames)
         assert mode in ['single', 'multi']
@@ -31,7 +31,7 @@ class imgDataset(VisionDataset):
             for fname in sorted(glob.glob(f'{root}/{cls}/{split}/*.png')):
                 fname = os.path.basename(fname)
                 id, cam = map(int, re.findall(r'\d+', fname))
-                if id > (num_model_instances if num_model_instances else np.inf):
+                if id > (per_cls_instances if per_cls_instances else np.inf):
                     break
                 self.img_fpaths[cam - 1].append(f'{root}/{cls}/{split}/{fname}')
                 if cam == 1:
