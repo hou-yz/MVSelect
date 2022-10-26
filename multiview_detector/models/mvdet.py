@@ -79,27 +79,27 @@ def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
 class CamPredModule(nn.Module):
     def __init__(self, num_cam, hidden_dim):
         super().__init__()
-        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), )
+        self.cam_feat = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
+                                      nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), )
         self.cam_feat[-1].weight.data.fill_(0)
         self.cam_feat[-1].bias.data.fill_(0)
-        self.register_buffer('cam_emb', create_pos_embedding(num_cam))
-        # self.cam_pred = nn.Embedding(num_cam, num_cam)
-        # self.cam_pred.weight.data.fill_(0)
-        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
+        self.cam_pred = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
                                       nn.Linear(hidden_dim, num_cam, bias=False))
         self.cam_pred[-1].weight.data.fill_(0)
 
     def forward(self, init_cam, world_feat, keep_cams, hard=False, override=None):
         B, N, C, H, W = world_feat.shape
         world_feat = world_feat.view([B * N, C, H, W])
-        if init_cam.dim() == 1:
-            assert init_cam.shape[0] == B
-            init_cam = torch.cat([torch.arange(B, device=init_cam.device)[:, None], init_cam[:, None]], dim=1)
+        if isinstance(init_cam, int):
+            init_cam = torch.cat([torch.arange(B, device=world_feat.device)[:, None],
+                                  torch.ones([B, 1], dtype=torch.long, device=world_feat.device) * init_cam], dim=1)
+        else:
+            init_cam = init_cam.to(world_feat.device)
         cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0)
         cam_emb = self.cam_emb[init_cam[:, 1]]
         init_feat = world_feat[init_cam[:, 0] * N + init_cam[:, 1]]
-        cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3]) + cam_emb
+        cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3])) + cam_emb
         logits = self.cam_pred(cam_feat)
         # logits = self.cam_pred(init_cam[:, 1])
         if self.training:
@@ -112,7 +112,7 @@ class CamPredModule(nn.Module):
             if override is None:
                 selected_cam = torch.argmax(cam_prob, dim=1)
             else:
-                selected_cam = torch.ones(init_cam.shape[0], device=init_cam.device).long() * override
+                selected_cam = torch.ones(init_cam.shape[0], device=world_feat.device).long() * override
             cam_prob_hard = torch.zeros_like(cam_prob).scatter_(1, selected_cam[:, None], 1.)
 
         select_feat = world_feat.view(B, N, C, H, W)[init_cam[:, 0]] * \
@@ -255,7 +255,6 @@ class MVDet(nn.Module):
         # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
 
         if init_cam is not None:
-            init_cam = init_cam.to(imgs.device)
             world_feat, (logits, cam_prob) = self.cam_pred(init_cam, world_feat, keep_cams, hard, override)
         else:
             logits, cam_prob = None, None
@@ -293,14 +292,13 @@ def test():
 
     model = MVDet(dataset)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
-    init_cam = torch.tensor([2, 4], dtype=torch.long)
     keep_cams[0, 3] = 0
     model.train()
     (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, keep_cams.nonzero(), keep_cams)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
     model.eval()
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-        model(imgs, affine_mats, init_cam, override=5)
+        model(imgs, affine_mats, 2, override=5)
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
         model(imgs, affine_mats, keep_cams.nonzero(), override=5)
     xysc_eval = ctdet_decode(world_heatmap, world_offset)
