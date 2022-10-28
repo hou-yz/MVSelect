@@ -15,10 +15,12 @@ from torch import optim
 from torch.utils.data import DataLoader
 from multiview_detector.datasets import *
 from multiview_detector.models.mvdet import MVDet
+from multiview_detector.models.mvcnn import MVCNN
 from multiview_detector.utils.logger import Logger
 from multiview_detector.utils.draw_curve import draw_curve
 from multiview_detector.utils.str2bool import str2bool
 from multiview_detector.trainer import PerspectiveTrainer
+from multiview_detector.trainer_mvcnn import ClassifierTrainer
 
 
 def main(args):
@@ -48,22 +50,42 @@ def main(args):
         torch.backends.cudnn.benchmark = True
 
     # dataset
-    if 'wildtrack' in args.dataset:
-        base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
-    elif 'multiviewx' in args.dataset:
-        base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
+    if 'modelnet40_12' in args.dataset:
+        fpath = os.path.expanduser('~/Data/modelnet/modelnet40_images_new_12x')
+        num_cam = 12
+
+        args.task = 'mvcnn'
+        args.lr = 5e-5 if args.lr is None else args.lr
+        args.batch_size = 8 if args.batch_size is None else args.batch_size
+
+        train_set = imgDataset(fpath, num_cam, mode='multi', split='train', )
+        val_set = imgDataset(fpath, num_cam, mode='multi', split='train', per_cls_instances=25)
+        test_set = imgDataset(fpath, num_cam, mode='multi', split='test', )
     else:
-        raise Exception('must choose from [wildtrack, multiviewx]')
-    train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
-                             img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                             img_kernel_size=args.img_kernel_size,
-                             dropout=args.dropcam, augmentation=args.augmentation)
-    val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
-                           img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                           img_kernel_size=args.img_kernel_size)
-    test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
-                            img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
-                            img_kernel_size=args.img_kernel_size)
+        if 'wildtrack' in args.dataset:
+            base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
+        elif 'multiviewx' in args.dataset:
+            base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
+        else:
+            raise Exception('must choose from [wildtrack, multiviewx]')
+
+        args.task = 'mvdet'
+        args.lr = 5e-4 if args.lr is None else args.lr
+        args.batch_size = 2 if args.batch_size is None else args.batch_size
+
+        train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
+                                 img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                                 img_kernel_size=args.img_kernel_size,
+                                 dropout=args.dropcam, augmentation=args.augmentation)
+        val_set = frameDataset(base, split='val', world_reduce=args.world_reduce,
+                               img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                               img_kernel_size=args.img_kernel_size)
+        test_set = frameDataset(base, split='test', world_reduce=args.world_reduce,
+                                img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
+                                img_kernel_size=args.img_kernel_size)
+
+    if args.select:
+        args.lr /= 5
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2 ** 32
@@ -79,9 +101,10 @@ def main(args):
 
     # logging
     if args.resume is None or not args.eval:
-        select_settings = f'hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}cover{args.beta_coverage}_'
+        select_settings = f'gumbel{int(args.gumbel)}_hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}' \
+                          f'cover{args.beta_coverage}_' if not args.random_select else 'random_select_'
         lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
-                      f'select{args.select_lr_ratio}' if args.select else ''
+                      f'select{args.select_lr_ratio}' if args.select and not args.random_select else ''
         logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
                  f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
                  f'{select_settings if args.select else ""}' \
@@ -100,7 +123,12 @@ def main(args):
     print(vars(args))
 
     # model
-    model = MVDet(train_set, args.arch, args.use_bottleneck, args.aggregation, args.hidden_dim, args.outfeat_dim).cuda()
+    if args.task == 'mvcnn':
+        model = MVCNN(train_set, args.arch, args.aggregation,
+                      gumbel=args.gumbel, random_select=args.random_select).cuda()
+    else:
+        model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
+                      gumbel=args.gumbel, random_select=args.random_select).cuda()
 
     # load checkpoint
     if args.select:
@@ -108,14 +136,14 @@ def main(args):
             result_str = fp.read()
         print(result_str)
         load_dir = result_str.split('\n')[1].replace('# ', '')
-        pretrained_dict = torch.load(f'{load_dir}/MultiviewDetector.pth')
+        pretrained_dict = torch.load(f'{load_dir}/model.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'cam_' not in k}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
 
     if args.resume:
-        pretrained_dict = torch.load(f'logs/{args.dataset}/{args.resume}/MultiviewDetector.pth')
+        pretrained_dict = torch.load(f'logs/{args.dataset}/{args.resume}/model.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'cam_' not in k}
         model_dict.update(pretrained_dict)
@@ -130,7 +158,7 @@ def main(args):
                     "lr": args.lr * args.select_lr_ratio, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
-    def warmup_lr_scheduler(epoch, warmup_epochs=int(0.3 * args.epochs)):
+    def warmup_lr_scheduler(epoch, warmup_epochs=0.1 * args.epochs):
         if epoch < warmup_epochs:
             return epoch / warmup_epochs
         else:
@@ -138,7 +166,10 @@ def main(args):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lr_scheduler)
 
-    trainer = PerspectiveTrainer(model, logdir, args)
+    if args.task == 'mvcnn':
+        trainer = ClassifierTrainer(model, logdir, args)
+    else:
+        trainer = PerspectiveTrainer(model, logdir, args)
 
     def test_with_select(dataloader, override=None, result_type='moda'):
         t0 = time.time()
@@ -157,6 +188,7 @@ def main(args):
     # draw curve
     x_epoch = []
     train_loss_s = []
+    train_prec_s = []
     test_loss_s = []
     test_prec_s = []
 
@@ -165,19 +197,21 @@ def main(args):
         # trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss = trainer.train(epoch, train_loader, optimizer, scheduler, hard=args.hard, )
+            train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler, hard=args.hard, )
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
-                test_loss, test_prec = test_with_select(test_loader)
+                test_loss, test_prec = test_with_select(test_loader,
+                                                        result_type='prec' if args.task == 'mvcnn' else 'moda')
 
                 # draw & save
                 x_epoch.append(epoch)
                 train_loss_s.append(train_loss)
+                train_prec_s.append(train_prec)
                 test_loss_s.append(test_loss)
                 test_prec_s.append(test_prec)
                 draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
-                           test_result=test_prec_s)
-                torch.save(model.state_dict(), os.path.join(logdir, 'MultiviewDetector.pth'))
+                           train_prec_s if args.task == 'mvcnn' else None, test_prec_s)
+                torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
     print('Test loaded model...')
     print(logdir)
 
@@ -211,45 +245,41 @@ def main(args):
                           f'{logdir}\n'
                           f'val / test',
                    footer=f'\tloss strategy\n' +
-                          ' '.join(f'cam {loss_strategy[cam]} {loss_strategy_precs[cam]:.1f} |'
-                                   for cam in range(train_set.num_cam)) + '\n' +
+                          ' '.join(f'cam {loss_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
+                          ' '.join(f'{loss_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
                           f'\tresult strategy\n' +
-                          ' '.join(f'cam {result_strategy[cam]} {result_strategy_precs[cam]:.1f} |'
-                                   for cam in range(train_set.num_cam)) + '\n' +
+                          ' '.join(f'cam {result_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
+                          ' '.join(f'{result_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
                           f'\ttheory\n' +
-                          ' '.join(f'cam {theory_strategy[cam]} {theory_strategy_precs[cam]:.1f} |'
-                                   for cam in range(train_set.num_cam)) + '\n' +
-                          f'2 best cam: loss_strategy {loss2cam:.1f}, '
-                          f'result_strategy {result2cam:.1f}, theory {best2cam:.1f}\n'
+                          ' '.join(f'cam {theory_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
+                          ' '.join(f'{theory_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
+                          f'2 best cam: loss_strategy {loss2cam:.1f}, result_strategy {result2cam:.1f}, '
+                          f'theory {best2cam:.1f}\n'
                           f'all cam: {prec:.1f}')
         with open(f'{logdir}/{fname}', 'r') as fp:
             print(fp.read())
         if args.resume is None:
             shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
-    if not args.select and not args.eval:
-        log_best2cam_strategy()
+    if not (args.select and not args.random_select) and not args.eval:
+        log_best2cam_strategy(result_type='prec' if args.task == 'mvcnn' else 'moda')
     else:
         trainer.test(test_loader)
 
 
 if __name__ == '__main__':
     # settings
-    parser = argparse.ArgumentParser(description='Multiview detector')
-    parser.add_argument('--reID', action='store_true')
+    parser = argparse.ArgumentParser(description='view selection for multiview classification & detection')
     parser.add_argument('--eval', action='store_true', help='evaluation only')
-    parser.add_argument('--id_ratio', type=float, default=0)
-    parser.add_argument('--cls_thres', type=float, default=0.6)
-    parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
-    parser.add_argument('--use_mse', type=str2bool, default=False)
     parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
-    parser.add_argument('-d', '--dataset', type=str, default='wildtrack', choices=['wildtrack', 'multiviewx'])
+    parser.add_argument('-d', '--dataset', type=str, default='wildtrack',
+                        choices=['wildtrack', 'multiviewx', 'modelnet40_12'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
-    parser.add_argument('-b', '--batch_size', type=int, default=2, help='input batch size for training')
+    parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
+    parser.add_argument('--lr', type=float, default=None, help='learning rate')
     parser.add_argument('--base_lr_ratio', type=float, default=1.0)
     parser.add_argument('--select_lr_ratio', type=float, default=1.0)
     parser.add_argument('--other_lr_ratio', type=float, default=1.0)
@@ -258,20 +288,27 @@ if __name__ == '__main__':
     parser.add_argument('--visualize', action='store_true')
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
-    parser.add_argument('--augmentation', type=str2bool, default=True)
-    parser.add_argument('--select', type=str2bool, default=False)
 
+    parser.add_argument('--select', type=str2bool, default=False)
+    parser.add_argument('--random_select', action='store_true')
+    parser.add_argument('--gumbel', type=str2bool, default=True)
+    parser.add_argument('--hard', type=str2bool, default=True)
+    parser.add_argument('--beta_conf', type=float, default=0.0)
+    parser.add_argument('--beta_even', type=float, default=0.0)
+
+    parser.add_argument('--reID', action='store_true')
+    parser.add_argument('--augmentation', type=str2bool, default=True)
+    parser.add_argument('--id_ratio', type=float, default=0)
+    parser.add_argument('--cls_thres', type=float, default=0.6)
+    parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
+    parser.add_argument('--use_mse', type=str2bool, default=False)
     parser.add_argument('--use_bottleneck', type=str2bool, default=True)
-    parser.add_argument('--outfeat_dim', type=int, default=0)
     parser.add_argument('--hidden_dim', type=int, default=128)
+    parser.add_argument('--outfeat_dim', type=int, default=0)
     parser.add_argument('--world_reduce', type=int, default=4)
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_reduce', type=int, default=12)
     parser.add_argument('--img_kernel_size', type=int, default=10)
-
-    parser.add_argument('--hard', type=str2bool, default=False)
-    parser.add_argument('--beta_conf', type=float, default=0.0)
-    parser.add_argument('--beta_even', type=float, default=0.0)
     parser.add_argument('--beta_coverage', type=float, default=0.1)
 
     args = parser.parse_args()
