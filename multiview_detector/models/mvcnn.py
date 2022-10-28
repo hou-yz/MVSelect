@@ -10,7 +10,8 @@ from multiview_detector.models.mvdet import CamPredModule
 
 
 class MVCNN(nn.Module):
-    def __init__(self, dataset, arch='vgg11', aggregation='max', ):
+    def __init__(self, dataset, arch='vgg11', aggregation='max',
+                 gumbel=False, random_select=False):
         super().__init__()
         self.num_cam = dataset.num_cam
         self.aggregation = aggregation
@@ -30,7 +31,7 @@ class MVCNN(nn.Module):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         # select camera based on initialization
-        self.cam_pred = CamPredModule(dataset.num_cam, base_dim)
+        self.cam_pred = CamPredModule(dataset.num_cam, base_dim, 1, gumbel, random_select)
         pass
 
     def forward(self, imgs, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
