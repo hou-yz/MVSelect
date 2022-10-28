@@ -24,20 +24,20 @@ class PerspectiveTrainer(object):
         self.mse_loss = nn.MSELoss()
         self.focal_loss = FocalLoss()
         self.regress_loss = RegL1Loss()
-        self.ce_loss = RegCELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
         self.entropy = Entropy()
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, identity_goal=False, log_interval=100):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, log_interval=100):
         self.model.train()
         if self.args.base_lr_ratio == 0:
             self.model.base.eval()
         losses = 0
         t0 = time.time()
-        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam])
+        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
-            B, N = imgs_gt['heatmap'].shape[:2]
+            B, N = imgs.shape[:2]
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.args.select:
@@ -77,22 +77,19 @@ class PerspectiveTrainer(object):
                 H, W = dataloader.dataset.Rworld_shape
                 coverages = ((softmax_to_hard(cam_prob) @ Rworld_coverage.view(N, -1).float()).view(-1, 1, H, W) +
                              Rworld_coverage[init_cam[:, 1]].cuda()).clamp(0, 1)
-                loss = self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) - \
-                       self.args.beta_coverage * coverages.mean()  # if self.args.beta_coverage else loss_w_hm
-                if init_cam is not None:
-                    cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0).cuda()
+                loss = (self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) -
+                        self.args.beta_coverage * coverages.mean()) if self.args.beta_coverage else loss_w_hm
 
-                    # logits_prob = masked_softmax(logits, cam_candidate, dim=1)
-                    # reg_conf = self.entropy(logits).mean()
-                    # reg_even = -self.entropy(logits.mean(dim=0))
-                    reg_conf = F.l1_loss(cam_prob, softmax_to_hard(cam_prob).detach())
-                    reg_even = F.l1_loss(cam_prob.mean(dim=0), cam_candidate.sum(dim=0) / cam_candidate.sum())
-                    loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
-                    if identity_goal:
-                        loss = F.l1_loss(cam_prob, cam_candidate / cam_candidate.sum(dim=1, keepdims=True))
+                reg_conf = (1 - cam_prob.max(dim=1)[0]).mean()
+                reg_even = 0
+                for b in range(len(init_cam)):
+                    cam = init_cam[b, 1].item()
+                    cam_prob_sum[cam] += cam_prob[b]
+                    reg_even += (cam_prob_sum[cam] / cam_prob_sum[cam].detach().sum()).max()
+                    cam_prob_sum = cam_prob_sum.detach()
+                reg_even /= len(init_cam)
 
-            if init_cam is not None:
-                cam_prob_sum += cam_prob.detach().cpu().sum(dim=0)
+                loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
 
             optimizer.zero_grad()
             loss.backward()
@@ -111,19 +108,19 @@ class PerspectiveTrainer(object):
                 # print(cyclic_scheduler.last_epoch, optimizer.param_groups[0]['lr'])
                 t1 = time.time()
                 t_epoch = t1 - t0
-                print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, loss: {losses / (batch_idx + 1):.6f}, '
-                      f'Time: {t_epoch:.1f}, maxima: {world_heatmap.detach().max().item():.3f}' +
-                      (f', prob: {cam_prob.detach().max(dim=1)[0].mean().item():.3f}'
-                       if self.args.select and init_cam is not None else ''))
+                print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, loss: {losses / (batch_idx + 1):.3f}, '
+                      f'Time: {t_epoch:.1f}' + (f', prob: {cam_prob.detach().max(dim=1)[0].mean().item():.3f}, '
+                                                f'reg_conf: {reg_conf.item():.3f}, reg_even: {reg_even.item():.3f}'
+                                                if self.args.select and init_cam is not None else ''))
                 if self.args.select:
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                                   zip(range(N), cam_prob_sum / cam_prob_sum.sum())))
+                                   zip(range(N), F.normalize(cam_prob_sum.sum(dim=0), p=1, dim=0).cpu())))
                 pass
             del imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams, init_cam, cam_candidate
             del world_heatmap, world_offset, imgs_heatmap, imgs_offset, imgs_wh, logits, cam_prob, logits_prob
             del loss, w_loss, loss_w_hm, loss_w_off, img_loss, loss_img_hm, loss_img_off, loss_img_wh
             del reg_conf, reg_even
-        return losses / len(dataloader)
+        return losses / len(dataloader), None
 
     def test(self, dataloader, init_cam=None, override=None, visualize=False):
         self.model.eval()
@@ -166,22 +163,6 @@ class PerspectiveTrainer(object):
             unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
             print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                            zip(unique_cams, unique_freq / len(selected_cams))))
-
-        if visualize:
-            # visualizing the heatmap for world
-            fig = plt.figure()
-            subplt0 = fig.add_subplot(211, title="output")
-            subplt1 = fig.add_subplot(212, title="target")
-            subplt0.imshow(world_heatmap.cpu().detach().numpy().squeeze())
-            subplt1.imshow(world_gt['heatmap'].squeeze())
-            plt.savefig(os.path.join(self.logdir, f'world.jpg'))
-            plt.close(fig)
-            # visualizing the heatmap for per-view estimation
-            heatmap0_foot = imgs_heatmap[0].detach().cpu().numpy().squeeze()
-            img0 = self.denormalize(data[0, 0]).cpu().numpy().squeeze().transpose([1, 2, 0])
-            img0 = Image.fromarray((img0 * 255).astype('uint8'))
-            foot_cam_result = add_heatmap_to_image(heatmap0_foot, img0)
-            foot_cam_result.save(os.path.join(self.logdir, 'cam1_foot.jpg'))
 
         res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
         np.savetxt(f'{self.logdir}/test.txt', res_list, '%d')

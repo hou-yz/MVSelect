@@ -21,13 +21,13 @@ class ClassifierTrainer(object):
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, identity_goal=False, log_interval=200):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, log_interval=1000):
         self.model.train()
         if self.args.base_lr_ratio == 0:
             self.model.base.eval()
         losses, correct, miss = 0, 0, 1e-8
         t0 = time.time()
-        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam])
+        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
@@ -50,20 +50,16 @@ class ClassifierTrainer(object):
 
             # regularization
             if self.args.select:
-                if init_cam is not None:
-                    cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0).cuda()
+                reg_conf = (1 - cam_prob.max(dim=1)[0]).mean()
+                reg_even = 0
+                for b in range(len(init_cam)):
+                    cam = init_cam[b, 1].item()
+                    cam_prob_sum[cam] += cam_prob[b]
+                    reg_even += (cam_prob_sum[cam] / cam_prob_sum[cam].detach().sum()).max()
+                    cam_prob_sum = cam_prob_sum.detach()
+                reg_even /= len(init_cam)
 
-                    # logits_prob = masked_softmax(logits, cam_candidate, dim=1)
-                    # reg_conf = self.entropy(logits).mean()
-                    # reg_even = -self.entropy(logits.mean(dim=0))
-                    reg_conf = F.l1_loss(cam_prob, softmax_to_hard(cam_prob).detach())
-                    reg_even = F.l1_loss(cam_prob.mean(dim=0), cam_candidate.sum(dim=0) / cam_candidate.sum())
-                    loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
-                    if identity_goal:
-                        loss = F.l1_loss(cam_prob, cam_candidate / cam_candidate.sum(dim=1, keepdims=True))
-
-            if init_cam is not None:
-                cam_prob_sum += cam_prob.detach().cpu().sum(dim=0)
+                loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
 
             optimizer.zero_grad()
             loss.backward()
@@ -83,12 +79,13 @@ class ClassifierTrainer(object):
                 t1 = time.time()
                 t_epoch = t1 - t0
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, '
-                      f'loss: {losses / (batch_idx + 1):.6f}, prec: {100. * correct / (correct + miss):.1f}%, '
-                      f'Time: {t_epoch:.1f}' + (f', prob: {cam_prob.detach().max(dim=1)[0].mean().item():.3f}'
+                      f'loss: {losses / (batch_idx + 1):.3f}, prec: {100. * correct / (correct + miss):.1f}%, '
+                      f'Time: {t_epoch:.1f}' + (f', prob: {cam_prob.detach().max(dim=1)[0].mean().item():.3f}, '
+                                                f'reg_conf: {reg_conf.item():.3f}, reg_even: {reg_even.item():.3f}'
                                                 if self.args.select and init_cam is not None else ''))
                 if self.args.select:
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                                   zip(range(N), cam_prob_sum / cam_prob_sum.sum())))
+                                   zip(range(N), F.normalize(cam_prob_sum.sum(dim=0), p=1, dim=0).cpu())))
                 pass
             del imgs, keep_cams, init_cam, cam_candidate
             del logits, cam_prob, logits_prob
@@ -121,6 +118,6 @@ class ClassifierTrainer(object):
             print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                            zip(unique_cams, unique_freq / len(selected_cams))))
 
-        print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%, ')
+        print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%')
 
         return losses / len(dataloader), correct / (correct + miss) * 100.0
