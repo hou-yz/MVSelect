@@ -27,7 +27,8 @@ class ClassifierTrainer(object):
             self.model.base.eval()
         losses, correct, miss = 0, 0, 1e-8
         t0 = time.time()
-        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
+        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
+        cam_pred_ema = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
@@ -41,7 +42,7 @@ class ClassifierTrainer(object):
                 init_cam = None
             cam_candidate, logits_prob = None, None
             reg_conf, reg_even = None, None
-            output, (logits, cam_prob) = self.model(imgs, init_cam, keep_cams, hard)
+            output, (cam_emb, cam_pred, cam_prob) = self.model(imgs, init_cam, keep_cams, hard)
             loss = self.ce_loss(output, tgt)
 
             pred = torch.argmax(output, 1)
@@ -50,16 +51,15 @@ class ClassifierTrainer(object):
 
             # regularization
             if self.args.select:
-                reg_conf = (1 - cam_prob.max(dim=1)[0]).mean()
+                reg_conf = (1 - F.softmax(cam_emb).max(dim=1)[0]).mean()
                 reg_even = 0
                 for b in range(len(init_cam)):
                     cam = init_cam[b, 1].item()
-                    cam_prob_sum[cam] += cam_prob[b]
-                    reg_even += (cam_prob_sum[cam] / cam_prob_sum[cam].detach().sum()).max()
-                    cam_prob_sum = cam_prob_sum.detach()
-                reg_even /= len(init_cam)
+                    reg_even += -(cam_pred_ema[cam] - cam_pred[b]).norm()
+                    cam_pred_ema[cam] = cam_pred_ema[cam] * 0.99 + cam_pred[b].detach() * 0.01
 
-                loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
+                loss = loss + reg_conf * self.args.beta_conf + reg_even / len(init_cam) * self.args.beta_even
+                cam_prob_sum += cam_prob.detach().sum(dim=0)
 
             optimizer.zero_grad()
             loss.backward()
@@ -85,10 +85,10 @@ class ClassifierTrainer(object):
                                                 if self.args.select and init_cam is not None else ''))
                 if self.args.select:
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                                   zip(range(N), F.normalize(cam_prob_sum.sum(dim=0), p=1, dim=0).cpu())))
+                                   zip(range(N), F.normalize(cam_prob_sum, p=1, dim=0).cpu())))
                 pass
             del imgs, keep_cams, init_cam, cam_candidate
-            del logits, cam_prob, logits_prob
+            del cam_emb, cam_pred, cam_prob, logits_prob
             del loss, output, tgt, pred
             del reg_conf, reg_even
         return losses / len(dataloader), correct / (correct + miss) * 100.0
@@ -102,7 +102,7 @@ class ClassifierTrainer(object):
             imgs, tgt = imgs.cuda(), tgt.cuda()
             # with autocast():
             with torch.no_grad():
-                output, (logits, cam_prob) = self.model(imgs, init_cam, override=override)
+                output, (cam_emb, cam_pred, cam_prob) = self.model(imgs, init_cam, override=override)
             loss = self.ce_loss(output, tgt)
             if init_cam is not None:
                 selected_cams.extend(cam_prob.argmax(dim=1).detach().cpu().numpy().tolist())
