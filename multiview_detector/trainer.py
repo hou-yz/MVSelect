@@ -35,11 +35,10 @@ class PerspectiveTrainer(object):
             self.model.base.eval()
         losses = 0
         t0 = time.time()
-        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
+        cam_prob_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
+        cam_pred_ema = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
-            for key in imgs_gt.keys():
-                imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             if self.args.select:
                 init_cam = np.concatenate([np.stack([b * np.ones(1), np.random.choice(
                     keep_cams[b].nonzero().squeeze(), 1, replace=False)]).T for b in range(B)])
@@ -51,45 +50,28 @@ class PerspectiveTrainer(object):
                 init_cam = None
             cam_candidate, logits_prob = None, None
             reg_conf, reg_even = None, None
-            (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), (logits, cam_prob) = \
+            world_heatmap, (cam_emb, cam_pred, cam_prob) = \
                 self.model(imgs.cuda(), affine_mats, init_cam, keep_cams, hard)
-            # world_mask = (dataloader.dataset.Rworld_coverage[cam_prob.argmax(dim=1).detach()] +
-            #               dataloader.dataset.Rworld_coverage[init_cam[:, 1]]) if self.args.select else None
-            # world_mask = dataloader.dataset.Rworld_coverage[init_cam[:, 1]] if self.args.select else None
-            loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
-            loss_w_off = self.regress_loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
-            # loss_w_id = self.ce_loss(world_id, world_gt['reg_mask'], world_gt['idx'], world_gt['pid'])
-            loss_img_hm = self.focal_loss(imgs_heatmap, imgs_gt['heatmap'], keep_cams.view(B * N, 1, 1, 1))
-            loss_img_off = self.regress_loss(imgs_offset, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['offset'])
-            loss_img_wh = self.regress_loss(imgs_wh, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['wh'])
-            # loss_img_id = self.ce_loss(imgs_id, imgs_gt['reg_mask'], imgs_gt['idx'], imgs_gt['pid'])
-
-            w_loss = loss_w_hm + loss_w_off  # + self.args.id_ratio * loss_w_id
-            img_loss = loss_img_hm + loss_img_off + loss_img_wh * 0.1  # + self.args.id_ratio * loss_img_id
-            loss = w_loss + img_loss / N * self.args.alpha
-            if self.args.use_mse:
-                loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device)) + \
-                       self.args.alpha * self.mse_loss(imgs_heatmap, imgs_gt['heatmap'].to(imgs_heatmap.device)) / N
+            loss = self.focal_loss(world_heatmap, world_gt['heatmap'])
 
             # regularization
             if self.args.select:
                 Rworld_coverage = dataloader.dataset.Rworld_coverage.cuda()
                 H, W = dataloader.dataset.Rworld_shape
                 coverages = ((softmax_to_hard(cam_prob) @ Rworld_coverage.view(N, -1).float()).view(-1, 1, H, W) +
-                             Rworld_coverage[init_cam[:, 1]].cuda()).clamp(0, 1)
-                loss = (self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) -
-                        self.args.beta_coverage * coverages.mean()) if self.args.beta_coverage else loss_w_hm
+                             Rworld_coverage[init_cam[:, 1]]).bool()
+                loss = self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) - \
+                       self.args.beta_coverage * coverages.mean()
 
-                reg_conf = (1 - cam_prob.max(dim=1)[0]).mean()
+                reg_conf = (1 - F.softmax(cam_emb).max(dim=1)[0]).mean()
                 reg_even = 0
                 for b in range(len(init_cam)):
                     cam = init_cam[b, 1].item()
-                    cam_prob_sum[cam] += cam_prob[b]
-                    reg_even += (cam_prob_sum[cam] / cam_prob_sum[cam].detach().sum()).max()
-                    cam_prob_sum = cam_prob_sum.detach()
-                reg_even /= len(init_cam)
+                    reg_even += -(cam_pred_ema[cam] - cam_pred[b]).norm()
+                    cam_pred_ema[cam] = cam_pred_ema[cam] * 0.99 + cam_pred[b].detach() * 0.01
 
-                loss += reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
+                loss = loss + reg_conf * self.args.beta_conf + reg_even / len(init_cam) * self.args.beta_even
+                cam_prob_sum += cam_prob.detach().sum(dim=0)
 
             optimizer.zero_grad()
             loss.backward()
@@ -114,11 +96,11 @@ class PerspectiveTrainer(object):
                                                 if self.args.select and init_cam is not None else ''))
                 if self.args.select:
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                                   zip(range(N), F.normalize(cam_prob_sum.sum(dim=0), p=1, dim=0).cpu())))
+                                   zip(range(N), F.normalize(cam_prob_sum, p=1, dim=0).cpu())))
                 pass
             del imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams, init_cam, cam_candidate
-            del world_heatmap, world_offset, imgs_heatmap, imgs_offset, imgs_wh, logits, cam_prob, logits_prob
-            del loss, w_loss, loss_w_hm, loss_w_off, img_loss, loss_img_hm, loss_img_off, loss_img_wh
+            del world_heatmap, cam_emb, cam_pred, cam_prob, logits_prob
+            del loss
             del reg_conf, reg_even
         return losses / len(dataloader), None
 
@@ -134,10 +116,9 @@ class PerspectiveTrainer(object):
                 imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             # with autocast():
             with torch.no_grad():
-                (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), (logits, cam_prob) = \
+                world_heatmap, (cam_emb, cam_pred, cam_prob) = \
                     self.model(data, affine_mats, init_cam, override=override)
-            loss_w_hm = self.focal_loss(world_heatmap, world_gt['heatmap'])
-            loss = loss_w_hm
+            loss = self.focal_loss(world_heatmap, world_gt['heatmap'])
             if self.args.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
             if init_cam is not None:
@@ -145,8 +126,9 @@ class PerspectiveTrainer(object):
 
             losses += loss.item()
 
-            xys = mvdet_decode(torch.sigmoid(world_heatmap.detach().cpu()), world_offset.detach().cpu(),
-                               reduce=dataloader.dataset.world_reduce)
+            if init_cam is not None:
+                world_heatmap *= dataloader.dataset.Rworld_coverage[init_cam].cuda()
+            xys = mvdet_decode(torch.sigmoid(world_heatmap.detach().cpu()), reduce=dataloader.dataset.world_reduce)
             grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
             if dataloader.dataset.base.indexing == 'xy':
                 positions = grid_xy
@@ -166,8 +148,9 @@ class PerspectiveTrainer(object):
 
         res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
         np.savetxt(f'{self.logdir}/test.txt', res_list, '%d')
+        # gt_fname = 'gt.txt' if init_cam is None else f'gt_{init_cam}.txt'
         recall, precision, moda, modp = evaluate(os.path.abspath(f'{self.logdir}/test.txt'),
-                                                 os.path.abspath(dataloader.dataset.gt_fpath),
+                                                 os.path.abspath(f'{dataloader.dataset.root}/gt.txt'),
                                                  dataloader.dataset.base.__name__)
         print(f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%')
 
