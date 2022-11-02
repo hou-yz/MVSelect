@@ -90,11 +90,9 @@ def CLEAR_MOD_HUN(gt, det):
         fp[0][t - 1] = Nt - c[0][t - 1]
         m[0][t - 1] = g[0][t - 1] - c[0][t - 1]
 
-    MODP = sum(1 - distances[distances < td] / td) / np.sum(c) * 100 if sum(
-        1 - distances[distances < td] / td) / np.sum(c) * 100 > 0 else 0
-    MODA = (1 - ((np.sum(m) + np.sum(fp)) / np.sum(g))) * 100 if (1 - (
-            (np.sum(m) + np.sum(fp)) / np.sum(g))) * 100 > 0 else 0
-    recall = np.sum(c) / np.sum(g) * 100 if np.sum(c) / np.sum(g) * 100 > 0 else 0
-    precision = np.sum(c) / (np.sum(fp) + np.sum(c)) * 100 if np.sum(c) / (np.sum(fp) + np.sum(c)) * 100 > 0 else 0
+    MODP = sum(1 - distances[distances < td] / td) / np.sum(c) * 100
+    MODA = (1 - ((np.sum(m) + np.sum(fp)) / np.sum(g))) * 100
+    recall = np.sum(c) / np.sum(g) * 100
+    precision = np.sum(c) / (np.sum(fp) + np.sum(c)) * 100
 
     return recall, precision, MODA, MODP
