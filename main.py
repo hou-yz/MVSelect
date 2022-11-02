@@ -29,6 +29,7 @@ def main(args):
     if gettrace():
         print('Hmm, Big Debugger is watching me')
         is_debug = True
+        torch.autograd.set_detect_anomaly(True)
     else:
         print('No sys.gettrace')
         is_debug = False
