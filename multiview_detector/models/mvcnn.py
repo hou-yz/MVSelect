@@ -44,18 +44,18 @@ class MVCNN(nn.Module):
         imgs = imgs.view(B * N, C, H, W)
 
         imgs_feat = self.base(imgs)
-        imgs_feat = self.avgpool(imgs_feat) * keep_cams.view(B * N, 1, 1, 1)
+        imgs_feat = self.avgpool(imgs_feat)
         _, C, H, W = imgs_feat.shape
         imgs_feat = imgs_feat.view(B, N, C, H, W)
 
         if init_cam is not None:
-            overall_feat, (logits, cam_prob) = self.cam_pred(init_cam, imgs_feat, keep_cams, hard, override)
+            overall_feat, (cam_emb, cam_pred, cam_prob) = self.cam_pred(init_cam, imgs_feat, keep_cams, hard, override)
         else:
-            overall_feat, (logits, cam_prob) = imgs_feat, (None, None)
+            overall_feat, (cam_emb, cam_pred, cam_prob) = imgs_feat, (None, None, None)
         overall_feat = overall_feat.mean(dim=1) if self.aggregation == 'mean' else overall_feat.max(dim=1)[0]
         overall_result = self.classifier(torch.flatten(overall_feat, 1))
 
-        return overall_result, (logits, cam_prob)
+        return overall_result, (cam_emb, cam_pred, cam_prob)
 
 
 if __name__ == '__main__':
