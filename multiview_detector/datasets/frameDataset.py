@@ -5,10 +5,11 @@ import time
 from operator import itemgetter
 from PIL import Image
 from kornia.geometry import warp_perspective
-from torchvision.datasets import VisionDataset
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
+from torchvision.datasets import VisionDataset
 from multiview_detector.utils.projection import *
 from multiview_detector.utils.image_utils import draw_umich_gaussian, random_affine
 import matplotlib.pyplot as plt
@@ -106,10 +107,9 @@ class frameDataset(VisionDataset):
         self.Rworld_coverage = self.get_world_coverage().bool()
 
         self.get_image_fpaths(frame_range)
-        self.get_gt_targets(split if split == 'trainval' else f'{split}\t', frame_range)
+        self.get_gt_targets(split if split == 'trainval' else f'{split} \t', frame_range)
         # gt in mot format for evaluation
-        self.gt_fpath = os.path.join(self.root, 'gt.txt')
-        if not os.path.exists(self.gt_fpath) or force_download:
+        if not os.path.exists(os.path.join(self.root, 'gt_0.txt')) or force_download:
             self.prepare_gt()
         pass
 
@@ -204,7 +204,7 @@ class frameDataset(VisionDataset):
         return world_from_img.float(), img_from_world.float()
 
     def prepare_gt(self):
-        og_gt = []
+        og_gt = [[] for _ in range(self.num_cam)]
         for fname in sorted(os.listdir(os.path.join(self.root, 'annotations_positions'))):
             frame = int(fname.split('.')[0])
             with open(os.path.join(self.root, 'annotations_positions', fname)) as json_file:
@@ -216,14 +216,14 @@ class frameDataset(VisionDataset):
                                 single_pedestrian['views'][cam]['ymin'] == -1 and
                                 single_pedestrian['views'][cam]['ymax'] == -1)
 
-                in_cam_range = sum(is_in_cam(cam) for cam in range(self.num_cam))
-                if not in_cam_range:
-                    continue
                 grid_x, grid_y = self.base.get_worldgrid_from_pos(single_pedestrian['positionID']).squeeze()
-                og_gt.append(np.array([frame, grid_x, grid_y]))
-        og_gt = np.stack(og_gt, axis=0)
-        os.makedirs(os.path.dirname(self.gt_fpath), exist_ok=True)
-        np.savetxt(self.gt_fpath, og_gt, '%d')
+                for cam in range(self.num_cam):
+                    if is_in_cam(cam):
+                        og_gt[cam].append(np.array([frame, grid_x, grid_y]))
+        og_gt = [np.stack(og_gt[cam], axis=0) for cam in range(self.num_cam)]
+        np.savetxt(f'{self.root}/gt.txt', np.unique(np.concatenate(og_gt, axis=0), axis=0), '%d')
+        for cam in range(self.num_cam):
+            np.savetxt(f'{self.root}/gt_{cam}.txt', og_gt[cam], '%d')
 
     def __getitem__(self, index, visualize=False):
         def plt_visualize():
@@ -292,11 +292,8 @@ def test(test_projection=False):
     from multiview_detector.datasets.Wildtrack import Wildtrack
     from multiview_detector.datasets.MultiviewX import MultiviewX
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', augmentation=True,
-                           dropout=1)
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='val', augmentation=True, dropout=1)
-    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')
-    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='val')
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
+    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=.1)
     # dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', semi_supervised=.1)
     # dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', semi_supervised=0.5)
