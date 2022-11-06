@@ -51,9 +51,15 @@ def main(args):
         torch.backends.cudnn.benchmark = True
 
     # dataset
-    if 'modelnet40_12' in args.dataset:
-        fpath = os.path.expanduser('~/Data/modelnet/modelnet40_images_new_12x')
-        num_cam = 12
+    if 'modelnet' in args.dataset:
+        if args.dataset == 'modelnet40_12':
+            fpath = os.path.expanduser('~/Data/modelnet/modelnet40_images_new_12x')
+            num_cam = 12
+        elif args.dataset == 'modelnet40_20':
+            fpath = os.path.expanduser('~/Data/modelnet/modelnet40v2png_ori4')
+            num_cam = 20
+        else:
+            raise Exception
 
         args.task = 'mvcnn'
         args.lr = 5e-5 if args.lr is None else args.lr
@@ -63,9 +69,9 @@ def main(args):
         val_set = imgDataset(fpath, num_cam, mode='multi', split='train', per_cls_instances=25)
         test_set = imgDataset(fpath, num_cam, mode='multi', split='test', )
     else:
-        if 'wildtrack' in args.dataset:
+        if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
-        elif 'multiviewx' in args.dataset:
+        elif args.dataset == 'multiviewx':
             base = MultiviewX(os.path.expanduser('~/Data/MultiviewX'))
         else:
             raise Exception('must choose from [wildtrack, multiviewx]')
@@ -228,18 +234,20 @@ def main(args):
             test_precs.append(test_prec)
         val_losses, val_precs = np.array(val_losses), np.array(val_precs)
         test_losses, test_precs = np.array(test_losses), np.array(test_precs)
-        loss_strategy = np.argmin(val_losses, axis=1)
-        loss_strategy_precs = test_precs[np.arange(train_set.num_cam), loss_strategy]
+        test_precs_avg = test_precs[~np.eye(train_set.num_cam, dtype=bool)].mean()
+        loss_strategy = np.argmin(val_losses, axis=0)
+        loss_strategy_precs = test_precs[loss_strategy, np.arange(train_set.num_cam)]
         loss2cam = np.mean(loss_strategy_precs)
-        result_strategy = np.argmax(val_precs, axis=1)
-        result_strategy_precs = test_precs[np.arange(train_set.num_cam), result_strategy]
+        result_strategy = np.argmax(val_precs, axis=0)
+        result_strategy_precs = test_precs[result_strategy, np.arange(train_set.num_cam)]
         result2cam = np.mean(result_strategy_precs)
-        theory_strategy = np.argmax(test_precs, axis=1)
-        theory_strategy_precs = test_precs[np.arange(train_set.num_cam), theory_strategy]
+        theory_strategy = np.argmax(test_precs, axis=0)
+        theory_strategy_precs = test_precs[theory_strategy, np.arange(train_set.num_cam)]
         best2cam = np.mean(theory_strategy_precs)
         _, prec = trainer.test(test_loader)
         np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_losses, test_losses]), '%.2f')
-        fname = f'{result_type}s_{prec:.1f}_Lstrategy{loss2cam:.1f}_Rstrategy{result2cam:.1f}_theory{best2cam:.1f}.txt'
+        fname = f'{result_type}s_{prec:.1f}_Lstrategy{loss2cam:.1f}_Rstrategy{result2cam:.1f}_' \
+                f'theory{best2cam:.1f}_avg{test_precs_avg:.1f}.txt'
         np.savetxt(f'{logdir}/{fname}',
                    np.concatenate([val_precs, test_precs]), '%.1f',
                    header=f'loading checkpoint...\n'
@@ -255,7 +263,7 @@ def main(args):
                           ' '.join(f'cam {theory_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
                           ' '.join(f'{theory_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
                           f'2 best cam: loss_strategy {loss2cam:.1f}, result_strategy {result2cam:.1f}, '
-                          f'theory {best2cam:.1f}\n'
+                          f'theory {best2cam:.1f}, average {test_precs_avg:.1f}\n'
                           f'all cam: {prec:.1f}')
         with open(f'{logdir}/{fname}', 'r') as fp:
             print(fp.read())
@@ -275,7 +283,7 @@ if __name__ == '__main__':
     parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack',
-                        choices=['wildtrack', 'multiviewx', 'modelnet40_12'])
+                        choices=['wildtrack', 'multiviewx', 'modelnet40_12', 'modelnet40_20'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
     parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
@@ -290,6 +298,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
 
+    parser.add_argument('--eval_init_cam', type=str2bool, default=False)
+
     parser.add_argument('--select', type=str2bool, default=False)
     parser.add_argument('--random_select', action='store_true')
     parser.add_argument('--gumbel', type=str2bool, default=True)
@@ -301,8 +311,8 @@ if __name__ == '__main__':
     parser.add_argument('--augmentation', type=str2bool, default=True)
     parser.add_argument('--id_ratio', type=float, default=0)
     parser.add_argument('--cls_thres', type=float, default=0.6)
-    parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
-    parser.add_argument('--use_mse', type=str2bool, default=False)
+    # parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
+    # parser.add_argument('--use_mse', type=str2bool, default=False)
     parser.add_argument('--use_bottleneck', type=str2bool, default=True)
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--outfeat_dim', type=int, default=0)
@@ -310,7 +320,7 @@ if __name__ == '__main__':
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_reduce', type=int, default=12)
     parser.add_argument('--img_kernel_size', type=int, default=10)
-    parser.add_argument('--beta_coverage', type=float, default=0.1)
+    parser.add_argument('--beta_coverage', type=float, default=0.05)
 
     args = parser.parse_args()
 
