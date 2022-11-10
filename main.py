@@ -62,6 +62,7 @@ def main(args):
             raise Exception
 
         args.task = 'mvcnn'
+        result_type = ['prec']
         args.lr = 5e-5 if args.lr is None else args.lr
         args.batch_size = 8 if args.batch_size is None else args.batch_size
 
@@ -77,6 +78,7 @@ def main(args):
             raise Exception('must choose from [wildtrack, multiviewx]')
 
         args.task = 'mvdet'
+        result_type = ['moda', 'modp', 'prec', 'recall']
         args.lr = 5e-4 if args.lr is None else args.lr
         args.batch_size = 2 if args.batch_size is None else args.batch_size
 
@@ -152,7 +154,7 @@ def main(args):
     if args.resume:
         pretrained_dict = torch.load(f'logs/{args.dataset}/{args.resume}/model.pth')
         model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and 'cam_' not in k}
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
 
@@ -178,7 +180,7 @@ def main(args):
     else:
         trainer = PerspectiveTrainer(model, logdir, args)
 
-    def test_with_select(dataloader, override=None, result_type='moda'):
+    def test_with_select(dataloader, override=None, result_type=['prec']):
         t0 = time.time()
         losses, precs = [], []
         for init_cam in range(train_set.num_cam) if args.select or override is not None else [None]:
@@ -186,8 +188,9 @@ def main(args):
             loss, prec = trainer.test(dataloader, init_cam, override)
             losses.append(loss)
             precs.append(prec)
-        loss, prec = np.average(losses), np.average(precs)
-        print(f'average {result_type}: {prec:.1f}%, average loss: {loss:.6f}, time: {time.time() - t0:.1f}')
+        loss, prec = np.average(losses), np.average(np.array(precs), axis=0)
+        result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, prec))
+        print(f'average {result_str}\t loss: {loss:.6f}, time: {time.time() - t0:.1f}')
         if override is not None:
             return losses, precs
         return loss, prec
@@ -207,22 +210,19 @@ def main(args):
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler, hard=args.hard, )
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
-                test_loss, test_prec = test_with_select(test_loader,
-                                                        result_type='prec' if args.task == 'mvcnn' else 'moda')
+                test_loss, test_prec = test_with_select(test_loader, result_type=result_type)
 
                 # draw & save
                 x_epoch.append(epoch)
                 train_loss_s.append(train_loss)
                 train_prec_s.append(train_prec)
                 test_loss_s.append(test_loss)
-                test_prec_s.append(test_prec)
+                test_prec_s.append(test_prec[0])
                 draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
                            train_prec_s if args.task == 'mvcnn' else None, test_prec_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
-    print('Test loaded model...')
-    print(logdir)
 
-    def log_best2cam_strategy(result_type='moda'):
+    def log_best2cam_strategy(result_type=['prec']):
         val_losses, val_precs = [], []
         test_losses, test_precs = [], []
         for cam in range(train_set.num_cam):
@@ -234,44 +234,50 @@ def main(args):
             test_precs.append(test_prec)
         val_losses, val_precs = np.array(val_losses), np.array(val_precs)
         test_losses, test_precs = np.array(test_losses), np.array(test_precs)
-        test_precs_avg = test_precs[~np.eye(train_set.num_cam, dtype=bool)].mean()
+        test_precs_avg = test_precs[~np.eye(train_set.num_cam, dtype=bool)].mean(axis=0)
         loss_strategy = np.argmin(val_losses, axis=0)
         loss_strategy_precs = test_precs[loss_strategy, np.arange(train_set.num_cam)]
-        loss2cam = np.mean(loss_strategy_precs)
-        result_strategy = np.argmax(val_precs, axis=0)
+        loss2cam = np.mean(loss_strategy_precs, axis=0)
+        result_strategy = np.argmax(val_precs[:, :, 0], axis=0)
         result_strategy_precs = test_precs[result_strategy, np.arange(train_set.num_cam)]
-        result2cam = np.mean(result_strategy_precs)
-        theory_strategy = np.argmax(test_precs, axis=0)
+        result2cam = np.mean(result_strategy_precs, axis=0)
+        theory_strategy = np.argmax(test_precs[:, :, 0], axis=0)
         theory_strategy_precs = test_precs[theory_strategy, np.arange(train_set.num_cam)]
-        best2cam = np.mean(theory_strategy_precs)
+        best2cam = np.mean(theory_strategy_precs, axis=0)
         _, prec = trainer.test(test_loader)
         np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_losses, test_losses]), '%.2f')
-        fname = f'{result_type}s_{prec:.1f}_Lstrategy{loss2cam:.1f}_Rstrategy{result2cam:.1f}_' \
-                f'theory{best2cam:.1f}_avg{test_precs_avg:.1f}.txt'
-        np.savetxt(f'{logdir}/{fname}',
-                   np.concatenate([val_precs, test_precs]), '%.1f',
-                   header=f'loading checkpoint...\n'
-                          f'{logdir}\n'
-                          f'val / test',
-                   footer=f'\tloss strategy\n' +
-                          ' '.join(f'cam {loss_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
-                          ' '.join(f'{loss_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
-                          f'\tresult strategy\n' +
-                          ' '.join(f'cam {result_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
-                          ' '.join(f'{result_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
-                          f'\ttheory\n' +
-                          ' '.join(f'cam {theory_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
-                          ' '.join(f'{theory_strategy_precs[cam]:.1f}% |' for cam in range(train_set.num_cam)) + '\n' +
-                          f'2 best cam: loss_strategy {loss2cam:.1f}, result_strategy {result2cam:.1f}, '
-                          f'theory {best2cam:.1f}, average {test_precs_avg:.1f}\n'
-                          f'all cam: {prec:.1f}')
-        with open(f'{logdir}/{fname}', 'r') as fp:
-            print(fp.read())
-        if args.resume is None:
-            shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
+        for i in range(len(result_type)):
+            fname = f'{result_type[i]}_{prec[i]:.1f}_Lstrategy{loss2cam[i]:.1f}_Rstrategy{result2cam[i]:.1f}_' \
+                    f'theory{best2cam[i]:.1f}_avg{test_precs_avg[i]:.1f}.txt'
+            np.savetxt(f'{logdir}/{fname}',
+                       np.concatenate([val_precs[:, :, i], test_precs[:, :, i]]), '%.1f',
+                       header=f'loading checkpoint...\n'
+                              f'{logdir}\n'
+                              f'val / test',
+                       footer=f'\tloss strategy\n' +
+                              ' '.join(f'cam {loss_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'{loss_strategy_precs[cam, i]:.1f}% |'
+                                       for cam in range(train_set.num_cam)) + '\n' +
+                              f'\tresult strategy\n' +
+                              ' '.join(f'cam {result_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'{result_strategy_precs[cam, i]:.1f}% |'
+                                       for cam in range(train_set.num_cam)) + '\n' +
+                              f'\ttheory\n' +
+                              ' '.join(f'cam {theory_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'{theory_strategy_precs[cam, i]:.1f}% |'
+                                       for cam in range(train_set.num_cam)) + '\n' +
+                              f'2 best cam: loss_strategy {loss2cam[i]:.1f}, result_strategy {result2cam[i]:.1f}, '
+                              f'theory {best2cam[i]:.1f}, average {test_precs_avg[i]:.1f}\n'
+                              f'all cam: {prec[i]:.1f}')
+            with open(f'{logdir}/{fname}', 'r') as fp:
+                print(fp.read())
+            if args.resume is None and not args.random_select and i == 0:
+                shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
-    if not (args.select and not args.random_select) and not args.eval:
-        log_best2cam_strategy(result_type='prec' if args.task == 'mvcnn' else 'moda')
+    print('Test loaded model...')
+    print(logdir)
+    if not args.select and not args.eval:
+        log_best2cam_strategy(result_type)
     else:
         trainer.test(test_loader)
 
@@ -311,8 +317,8 @@ if __name__ == '__main__':
     parser.add_argument('--augmentation', type=str2bool, default=True)
     parser.add_argument('--id_ratio', type=float, default=0)
     parser.add_argument('--cls_thres', type=float, default=0.6)
-    # parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
-    # parser.add_argument('--use_mse', type=str2bool, default=False)
+    parser.add_argument('--alpha', type=float, default=1.0, help='ratio for per view loss')
+    parser.add_argument('--use_mse', type=str2bool, default=False)
     parser.add_argument('--use_bottleneck', type=str2bool, default=True)
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--outfeat_dim', type=int, default=0)

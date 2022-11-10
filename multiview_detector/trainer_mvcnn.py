@@ -51,10 +51,12 @@ class ClassifierTrainer(object):
 
             # regularization
             if self.args.select:
-                reg_conf = (1 - F.softmax(cam_emb).max(dim=1)[0]).mean()
+                reg_conf = (1 - F.softmax(cam_emb, dim=1).max(dim=1)[0]).mean()
                 reg_even = 0
                 for b in range(len(init_cam)):
                     cam = init_cam[b, 1].item()
+                    if cam_pred_ema[cam].sum().item() == 0:
+                        cam_pred_ema[cam] = cam_pred[b].detach()
                     reg_even += -(cam_pred_ema[cam] - cam_pred[b]).norm()
                     cam_pred_ema[cam] = cam_pred_ema[cam] * 0.99 + cam_pred[b].detach() * 0.01
 
@@ -94,6 +96,7 @@ class ClassifierTrainer(object):
         return losses / len(dataloader), correct / (correct + miss) * 100.0
 
     def test(self, dataloader, init_cam=None, override=None, visualize=False):
+        t0 = time.time()
         self.model.eval()
         losses, correct, miss = 0, 0, 1e-8
         selected_cams = []
@@ -118,6 +121,7 @@ class ClassifierTrainer(object):
             print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                            zip(unique_cams, unique_freq / len(selected_cams))))
 
-        print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%')
+        print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%, '
+              f'time: {time.time() - t0:.1f}s')
 
-        return losses / len(dataloader), correct / (correct + miss) * 100.0
+        return losses / len(dataloader), [correct / (correct + miss) * 100.0, ]
