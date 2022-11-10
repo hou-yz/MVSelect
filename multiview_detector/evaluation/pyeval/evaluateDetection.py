@@ -16,58 +16,38 @@ def evaluateDetection_py(res_fpath, gt_fpath):
     @return: MODP, MODA, recall, precision
     """
 
-    gtRaw = np.loadtxt(gt_fpath)
-    detRaw = np.loadtxt(res_fpath)
-    if detRaw.shape == (3,):
-        detRaw = detRaw[None, :]
-    frames = np.unique(detRaw[:, 0]) if detRaw.size else np.zeros(0)
-    frame_ctr = 0
-    gt_flag = True
-    det_flag = True
+    gt_raw = np.loadtxt(gt_fpath)
+    det_raw = np.loadtxt(res_fpath)
+    if det_raw.shape == (3,):
+        det_raw = det_raw[None, :]
+    frames = np.unique(det_raw[:, 0]) if det_raw.size else np.zeros(0)
 
-    gtAllMatrix = 0
-    detAllMatrix = 0
-    if detRaw is None or detRaw.shape[0] == 0:
-        MODP, MODA, recall, precision = 0, 0, 0, 0
-        return MODP, MODA, recall, precision
+    gt_formatted = []
+    det_formatted = []
+    if det_raw is None or det_raw.shape[0] == 0:
+        MODA, MODP, precision, recall = 0, 0, 0, 0
+        return recall, precision, MODA, MODP
 
-    for t in frames:
-        idxs = np.where(gtRaw[:, 0] == t)
-        idx = idxs[0]
-        idx_len = len(idx)
-        tmp_arr = np.zeros(shape=(idx_len, 4))
-        tmp_arr[:, 0] = np.array([frame_ctr for _ in range(idx_len)])
-        tmp_arr[:, 1] = np.array([i for i in range(idx_len)])
-        tmp_arr[:, 2] = np.array([j for j in gtRaw[idx, 1]])
-        tmp_arr[:, 3] = np.array([k for k in gtRaw[idx, 2]])
+    for frame_ctr, t in enumerate(frames):
+        gt_in_frame = gt_raw[gt_raw[:, 0] == t, 1:]
+        gt_in_frame = np.concatenate([np.ones([len(gt_in_frame), 1]) * frame_ctr,
+                                      np.arange(len(gt_in_frame))[:, None],
+                                      gt_in_frame], axis=1)
+        gt_formatted.append(gt_in_frame)
 
-        if gt_flag:
-            gtAllMatrix = tmp_arr
-            gt_flag = False
-        else:
-            gtAllMatrix = np.concatenate((gtAllMatrix, tmp_arr), axis=0)
-        idxs = np.where(detRaw[:, 0] == t)
-        idx = idxs[0]
-        idx_len = len(idx)
-        tmp_arr = np.zeros(shape=(idx_len, 4))
-        tmp_arr[:, 0] = np.array([frame_ctr for _ in range(idx_len)])
-        tmp_arr[:, 1] = np.array([i for i in range(idx_len)])
-        tmp_arr[:, 2] = np.array([j for j in detRaw[idx, 1]])
-        tmp_arr[:, 3] = np.array([k for k in detRaw[idx, 2]])
-
-        if det_flag:
-            detAllMatrix = tmp_arr
-            det_flag = False
-        else:
-            detAllMatrix = np.concatenate((detAllMatrix, tmp_arr), axis=0)
-        frame_ctr += 1
-    recall, precision, MODA, MODP = CLEAR_MOD_HUN(gtAllMatrix, detAllMatrix)
+        det_in_frame = det_raw[det_raw[:, 0] == t, 1:]
+        det_in_frame = np.concatenate([np.ones([len(det_in_frame), 1]) * frame_ctr,
+                                       np.arange(len(det_in_frame))[:, None],
+                                       det_in_frame], axis=1)
+        det_formatted.append(det_in_frame)
+    gt_formatted = np.concatenate(gt_formatted)
+    det_formatted = np.concatenate(det_formatted)
+    recall, precision, MODA, MODP = CLEAR_MOD_HUN(gt_formatted, det_formatted)
     return recall, precision, MODA, MODP
 
 
 if __name__ == "__main__":
-    res_fpath = "/home/houyz/Code/MVselect/logs/wildtrack/S_lr0.0005_2022-06-12_01-02-58/test.txt"
-    gt_fpath = "/home/houyz/Data/Wildtrack/gt.txt"
-    dataset_name = "Wildtrack"
+    res_fpath = "/home/houyz/Code/MVselect/logs/multiviewx/resnet18_max_lr0.0005_b2_e10_dropcam0.0_2022-11-09_12-01-22/test.txt"
+    gt_fpath = "/home/houyz/Data/MultiviewX/gt.txt"
     recall, precision, moda, modp = evaluateDetection_py(res_fpath, gt_fpath)
     print(f'python eval: MODA {moda:.1f}, MODP {modp:.1f}, prec {precision:.1f}, rcll {recall:.1f}')

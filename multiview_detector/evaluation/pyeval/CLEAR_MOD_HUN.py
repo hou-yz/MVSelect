@@ -28,19 +28,18 @@ def CLEAR_MOD_HUN(gt, det):
     """
     td = 50 / 2.5  # distance threshold
 
-    F = int(max(gt[:, 0])) + 1
+    F = int(max(det[:, 0])) + 1
     N = int(max(det[:, 1])) + 1
     Fgt = int(max(gt[:, 0])) + 1
     Ngt = int(max(gt[:, 1])) + 1
 
     M = np.zeros((F, Ngt))
 
-    c = np.zeros((1, F))
+    matches = np.zeros((1, F))  # c in original code
     fp = np.zeros((1, F))
-    m = np.zeros((1, F))
-    g = np.zeros((1, F))
+    fn = np.zeros((1, F))  # m in original code
+    num_gt = np.zeros((1, F))  # g in original code
 
-    d = np.zeros((F, Ngt))
     distances = np.inf * np.ones((F, Ngt))
 
     for t in range(1, F + 1):
@@ -53,7 +52,7 @@ def CLEAR_MOD_HUN(gt, det):
 
         Ngtt = GTsInFrame.shape[1]
         Nt = DetsInFrame.shape[1]
-        g[0, t - 1] = Ngtt
+        num_gt[0, t - 1] = Ngtt
 
         if GTsInFrame is not None and DetsInFrame is not None:
             dist = np.inf * np.ones((Ngtt, Nt))
@@ -76,7 +75,7 @@ def CLEAR_MOD_HUN(gt, det):
                     M[t - 1, u[mmm - 1]] = v[mmm - 1] + 1
         curdetected, = np.where(M[t - 1, :])
 
-        c[0][t - 1] = curdetected.shape[0]
+        matches[0][t - 1] = curdetected.shape[0]
         for ct in curdetected:
             eid = M[t - 1, ct] - 1
             gtX = gt[GTsInFrame[0][ct], 2]
@@ -87,12 +86,12 @@ def CLEAR_MOD_HUN(gt, det):
             stY = det[DetsInFrame[0][int(eid)], 3]
 
             distances[t - 1, ct] = getDistance(gtX, gtY, stX, stY)
-        fp[0][t - 1] = Nt - c[0][t - 1]
-        m[0][t - 1] = g[0][t - 1] - c[0][t - 1]
+        fp[0][t - 1] = Nt - matches[0][t - 1]
+        fn[0][t - 1] = num_gt[0][t - 1] - matches[0][t - 1]
 
-    MODP = sum(1 - distances[distances < td] / td) / np.sum(c) * 100
-    MODA = (1 - ((np.sum(m) + np.sum(fp)) / np.sum(g))) * 100
-    recall = np.sum(c) / np.sum(g) * 100
-    precision = np.sum(c) / (np.sum(fp) + np.sum(c)) * 100
+    MODP = sum(1 - distances[distances < td] / td) / np.sum(matches) * 100
+    MODA = (1 - ((np.sum(fn) + np.sum(fp)) / np.sum(num_gt))) * 100
+    recall = np.sum(matches) / np.sum(num_gt) * 100
+    precision = np.sum(matches) / (np.sum(fp) + np.sum(matches)) * 100
 
     return recall, precision, MODA, MODP
