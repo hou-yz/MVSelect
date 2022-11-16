@@ -210,15 +210,23 @@ class frameDataset(VisionDataset):
             with open(os.path.join(self.root, 'annotations_positions', fname)) as json_file:
                 all_pedestrians = json.load(json_file)
             for single_pedestrian in all_pedestrians:
-                def is_in_cam(cam):
-                    return not (single_pedestrian['views'][cam]['xmin'] == -1 and
-                                single_pedestrian['views'][cam]['xmax'] == -1 and
-                                single_pedestrian['views'][cam]['ymin'] == -1 and
-                                single_pedestrian['views'][cam]['ymax'] == -1)
+                def is_in_cam(cam, grid_x, grid_y):
+                    visible = not (single_pedestrian['views'][cam]['xmin'] == -1 and
+                                   single_pedestrian['views'][cam]['xmax'] == -1 and
+                                   single_pedestrian['views'][cam]['ymin'] == -1 and
+                                   single_pedestrian['views'][cam]['ymax'] == -1)
+                    in_view = (single_pedestrian['views'][cam]['xmin'] > 0 and
+                               single_pedestrian['views'][cam]['xmax'] < 1920 and
+                               single_pedestrian['views'][cam]['ymin'] > 0 and
+                               single_pedestrian['views'][cam]['ymax'] < 1080)
+
+                    # Rgrid_x, Rgrid_y = grid_x // self.world_reduce, grid_y // self.world_reduce
+                    # in_map = Rgrid_x < self.Rworld_shape[0] and Rgrid_y < self.Rworld_shape[1]
+                    return visible and in_view
 
                 grid_x, grid_y = self.base.get_worldgrid_from_pos(single_pedestrian['positionID']).squeeze()
                 for cam in range(self.num_cam):
-                    if is_in_cam(cam):
+                    if is_in_cam(cam, grid_x, grid_y):
                         og_gt[cam].append(np.array([frame, grid_x, grid_y]))
         og_gt = [np.stack(og_gt[cam], axis=0) for cam in range(self.num_cam)]
         np.savetxt(f'{self.root}/gt.txt', np.unique(np.concatenate(og_gt, axis=0), axis=0), '%d')

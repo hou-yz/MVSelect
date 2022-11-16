@@ -10,7 +10,7 @@ from multiview_detector.models.mvdet import CamPredModule
 
 
 class MVCNN(nn.Module):
-    def __init__(self, dataset, arch='vgg11', aggregation='max',
+    def __init__(self, dataset, arch='resnet18', aggregation='max',
                  gumbel=False, random_select=False):
         super().__init__()
         self.num_cam = dataset.num_cam
@@ -48,6 +48,9 @@ class MVCNN(nn.Module):
         _, C, H, W = imgs_feat.shape
         imgs_feat = imgs_feat.view(B, N, C, H, W)
 
+        # return imgs_feat
+        # def forward(self, imgs_feat, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
+
         if init_cam is not None:
             overall_feat, (cam_emb, cam_pred, cam_prob) = self.cam_pred(init_cam, imgs_feat, keep_cams, hard, override)
         else:
@@ -61,15 +64,20 @@ class MVCNN(nn.Module):
 if __name__ == '__main__':
     from multiview_detector.datasets import imgDataset
     from torch.utils.data import DataLoader
+    from thop import profile
 
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12, mode='multi')
-    dataloader = DataLoader(dataset, 2, False, num_workers=0)
+    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v2png_ori4', 20)
+    dataloader = DataLoader(dataset, 1, False, num_workers=0)
     imgs, tgt, keep_cams = next(iter(dataloader))
     model = MVCNN(dataset)
-    keep_cams[0, 3] = 0
-    model.train()
-    res = model(imgs, keep_cams.nonzero(), keep_cams)
-    model.eval()
-    res = model(imgs, 2, override=5)
-    res = model(imgs, keep_cams.nonzero(), override=5)
+    macs, params = profile(model, inputs=(imgs[:, ],))
+
+    print(f'{macs}')
+    print(f'{params}')
+    # keep_cams[0, 3] = 0
+    # model.train()
+    # res = model(imgs, keep_cams.nonzero(), keep_cams)
+    # model.eval()
+    # res = model(imgs, 2, override=5)
+    # res = model(imgs, keep_cams.nonzero(), override=5)
     pass

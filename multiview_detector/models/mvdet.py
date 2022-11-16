@@ -92,7 +92,8 @@ class CamPredModule(nn.Module):
         # self.cam_feat[-2].weight.data.fill_(0)
         # self.cam_feat[-2].bias.data.fill_(0)
         # self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
-        self.cam_emb = nn.Parameter(torch.zeros([num_cam, num_cam]))
+        self.cam_emb = nn.Embedding(num_cam, num_cam)
+        self.cam_emb.weight.data.fill_(0)
         self.cam_pred = nn.Linear(hidden_dim, num_cam, bias=False)
         self.cam_pred.weight.data.fill_(0)
         self.gumbel = gumbel
@@ -110,7 +111,7 @@ class CamPredModule(nn.Module):
         init_feat = world_feat[init_cam[:, 0] * N + init_cam[:, 1]]
         if override is None:
             if not self.random_select:
-                cam_emb = F.layer_norm(self.cam_emb[init_cam[:, 1]], [N])
+                cam_emb = F.layer_norm(self.cam_emb(init_cam[:, 1]), [N])
                 # cam_feat = self.cam_feat(init_feat[:, :, None, None] if len(init_feat.shape) == 2 else init_feat)
                 cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3]))
                 cam_pred = F.layer_norm(self.cam_pred(cam_feat), [N]) / 10
@@ -271,6 +272,8 @@ class MVDet(nn.Module):
                 visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
+        # return world_feat
+        # def forward(self, world_feat, M, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
 
         # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
 
@@ -306,22 +309,28 @@ def test():
     import torchvision.transforms as T
     from torch.utils.data import DataLoader
     from multiview_detector.utils.decode import ctdet_decode
+    from thop import profile
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train')
-    dataloader = DataLoader(dataset, 2, False, num_workers=0)
+    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')
+    dataloader = DataLoader(dataset, 1, False, num_workers=0)
 
     model = MVDet(dataset)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     keep_cams[0, 3] = 0
     model.train()
-    (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, keep_cams.nonzero(), keep_cams)
-    xysc_train = ctdet_decode(world_heatmap, world_offset)
-    model.eval()
-    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-        model(imgs, affine_mats, 2, override=5)
-    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-        model(imgs, affine_mats, keep_cams.nonzero(), override=5)
-    xysc_eval = ctdet_decode(world_heatmap, world_offset)
+    # macs, params = profile(model, inputs=(imgs[:, :2], affine_mats))
+    macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))
+
+    print(f'{macs}')
+    print(f'{params}')
+    # (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, keep_cams.nonzero(), keep_cams)
+    # xysc_train = ctdet_decode(world_heatmap, world_offset)
+    # model.eval()
+    # (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
+    #     model(imgs, affine_mats, 2, override=5)
+    # (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
+    #     model(imgs, affine_mats, keep_cams.nonzero(), override=5)
+    # xysc_eval = ctdet_decode(world_heatmap, world_offset)
     pass
 
 
