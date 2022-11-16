@@ -13,14 +13,14 @@ import numpy as np
 import torch
 from torch import optim
 from torch.utils.data import DataLoader
-from multiview_detector.datasets import *
-from multiview_detector.models.mvdet import MVDet
-from multiview_detector.models.mvcnn import MVCNN
-from multiview_detector.utils.logger import Logger
-from multiview_detector.utils.draw_curve import draw_curve
-from multiview_detector.utils.str2bool import str2bool
-from multiview_detector.trainer import PerspectiveTrainer
-from multiview_detector.trainer_mvcnn import ClassifierTrainer
+from src.datasets import *
+from src.models.mvdet import MVDet
+from src.models.mvcnn import MVCNN
+from src.utils.logger import Logger
+from src.utils.draw_curve import draw_curve
+from src.utils.str2bool import str2bool
+from src.trainer import PerspectiveTrainer
+from src.trainer_mvcnn import ClassifierTrainer
 
 
 def main(args):
@@ -119,7 +119,7 @@ def main(args):
                  f'{select_settings if args.select else ""}' \
                  f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
-        copy_tree('./multiview_detector', logdir + '/scripts/multiview_detector')
+        copy_tree('src', logdir + '/scripts/src')
         for script in os.listdir('.'):
             if script.split('.')[-1] == 'py':
                 dst_file = os.path.join(logdir, 'scripts', os.path.basename(script))

@@ -10,8 +10,8 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
 from torchvision.datasets import VisionDataset
-from multiview_detector.utils.projection import *
-from multiview_detector.utils.image_utils import draw_umich_gaussian, random_affine
+from src.utils.projection import *
+from src.utils.image_utils import draw_umich_gaussian, random_affine
 import matplotlib.pyplot as plt
 
 
@@ -297,8 +297,8 @@ class frameDataset(VisionDataset):
 
 def test(test_projection=False):
     from torch.utils.data import DataLoader
-    from multiview_detector.datasets.Wildtrack import Wildtrack
-    from multiview_detector.datasets.MultiviewX import MultiviewX
+    from src.datasets.Wildtrack import Wildtrack
+    from src.datasets.MultiviewX import MultiviewX
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
     dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
@@ -324,7 +324,7 @@ def test(test_projection=False):
     pass
     if test_projection:
         import matplotlib.pyplot as plt
-        from multiview_detector.utils.projection import get_worldcoord_from_imagecoord
+        from src.utils.projection import get_worldcoord_from_imagecoord
         world_grid_maps = []
         xx, yy = np.meshgrid(np.arange(0, 1920, 20), np.arange(0, 1080, 20))
         H, W = xx.shape

@@ -5,10 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 from kornia.geometry import warp_perspective
-from multiview_detector.models.resnet import resnet18
-from multiview_detector.models.shufflenetv2 import shufflenet_v2_x0_5
-from multiview_detector.utils.image_utils import img_color_denormalize, array2heatmap
-from multiview_detector.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
+from src.models.resnet import resnet18
+from src.models.shufflenetv2 import shufflenet_v2_x0_5
+from src.utils.image_utils import img_color_denormalize, array2heatmap
+from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
 import matplotlib.pyplot as plt
 
 
@@ -303,12 +303,12 @@ class MVDet(nn.Module):
 
 
 def test():
-    from multiview_detector.datasets.frameDataset import frameDataset
-    from multiview_detector.datasets.Wildtrack import Wildtrack
-    from multiview_detector.datasets.MultiviewX import MultiviewX
+    from src.datasets.frameDataset import frameDataset
+    from src.datasets.Wildtrack import Wildtrack
+    from src.datasets.MultiviewX import MultiviewX
     import torchvision.transforms as T
     from torch.utils.data import DataLoader
-    from multiview_detector.utils.decode import ctdet_decode
+    from src.utils.decode import ctdet_decode
     from thop import profile
 
     dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')

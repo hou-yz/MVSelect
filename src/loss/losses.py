@@ -10,7 +10,7 @@ from __future__ import print_function
 
 import torch
 import torch.nn as nn
-from multiview_detector.utils.tensor_utils import _transpose_and_gather_feat, _sigmoid
+from src.utils.tensor_utils import _transpose_and_gather_feat, _sigmoid
 import torch.nn.functional as F
 
 

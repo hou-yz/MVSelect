@@ -7,13 +7,13 @@ from torch import nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
-from multiview_detector.loss import *
-from multiview_detector.evaluation.evaluate import evaluate
-from multiview_detector.utils.decode import ctdet_decode, mvdet_decode
-from multiview_detector.utils.nms import nms
-from multiview_detector.utils.meters import AverageMeter
-from multiview_detector.utils.image_utils import add_heatmap_to_image, img_color_denormalize
-from multiview_detector.models.mvdet import softmax_to_hard, masked_softmax
+from src.loss import *
+from src.evaluation.evaluate import evaluate
+from src.utils.decode import ctdet_decode, mvdet_decode
+from src.utils.nms import nms
+from src.utils.meters import AverageMeter
+from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
+from src.models.mvdet import softmax_to_hard, masked_softmax
 
 
 class PerspectiveTrainer(object):

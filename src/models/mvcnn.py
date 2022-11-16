@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 import torchvision.models as models
 import matplotlib.pyplot as plt
-from multiview_detector.models.mvdet import CamPredModule
+from src.models.mvdet import CamPredModule
 
 
 class MVCNN(nn.Module):
@@ -62,7 +62,7 @@ class MVCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    from multiview_detector.datasets import imgDataset
+    from src.datasets import imgDataset
     from torch.utils.data import DataLoader
     from thop import profile
 

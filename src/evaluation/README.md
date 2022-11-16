@@ -33,5 +33,5 @@ detection result file: ```motchallenge-devkit/test.txt```
     - The second and third column should be x and y coordinate
 
 ## Alternative Tools
-A Python version of the official MATLAB API is provided in ```multiview_detector/pyeval```
+A Python version of the official MATLAB API is provided in ```src/evaluation/pyeval```
 

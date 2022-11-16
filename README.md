@@ -54,7 +54,7 @@ Data
 ```
 
 ## Code Preparation
-Before running the code, one should go to ```multiview_detector/models/ops``` and run ```bash mask.sh``` to build the deformable transformer (forked from [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR)). 
+Before running the code, one should go to ```src/models/ops``` and run ```bash mask.sh``` to build the deformable transformer (forked from [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR)). 
 
 
 ## Training

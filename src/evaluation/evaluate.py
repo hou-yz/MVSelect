@@ -2,12 +2,12 @@ import numpy as np
 
 
 # import matlab.engine
-# from multiview_detector.evaluation.pyeval.evaluateDetection import evaluateDetection_py
+# from src.evaluation.pyeval.evaluateDetection import evaluateDetection_py
 
 
 # def matlab_eval(res_fpath, gt_fpath, dataset='wildtrack'):
 #     eng = matlab.engine.start_matlab()
-#     eng.cd('multiview_detector/evaluation/motchallenge-devkit')
+#     eng.cd('src/evaluation/motchallenge-devkit')
 #     res = eng.evaluateDetection(res_fpath, gt_fpath, dataset)
 #     recall, precision, moda, modp = np.array(res['detMets']).squeeze()[[0, 1, -2, -1]]
 #     return recall, precision, moda, modp
@@ -23,11 +23,11 @@ def evaluate(res_fpath, gt_fpath, dataset='wildtrack'):
         import matlab.engine
 
         eng = matlab.engine.start_matlab()
-        eng.cd('multiview_detector/evaluation/motchallenge-devkit')
+        eng.cd('src/evaluation/motchallenge-devkit')
         res = eng.evaluateDetection(res_fpath, gt_fpath, dataset)
         recall, precision, moda, modp = np.array(res['detMets']).squeeze()[[0, 1, -2, -1]]
     except:
-        from multiview_detector.evaluation.pyeval.evaluateDetection import evaluateDetection_py
+        from src.evaluation.pyeval.evaluateDetection import evaluateDetection_py
 
         recall, precision, moda, modp = evaluateDetection_py(res_fpath, gt_fpath)
     return recall, precision, moda, modp

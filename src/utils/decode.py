@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from multiview_detector.utils.tensor_utils import _gather_feat, _transpose_and_gather_feat
+from src.utils.tensor_utils import _gather_feat, _transpose_and_gather_feat
 
 
 def _nms(heatmap, kernel_size=3):
