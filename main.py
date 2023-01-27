@@ -184,8 +184,15 @@ def main(args):
         t0 = time.time()
         losses, precs = [], []
         for init_cam in range(train_set.num_cam) if args.select or override is not None else [None]:
-            print(f'init camera {init_cam}:')
-            loss, prec = trainer.test(dataloader, init_cam, override)
+            if isinstance(init_cam, int):
+                print(f'init camera {init_cam}:')
+                if override is not None and init_cam > override:
+                    loss, prec = 0, [0, ] if args.task == 'mvcnn' else [0, 0, 0, 0, ]
+                else:
+                    loss, prec = trainer.test(dataloader, init_cam, override)
+            else:
+                print(f'using all cameras:')
+                loss, prec = trainer.test(dataloader, init_cam, override)
             losses.append(loss)
             precs.append(prec)
         loss, prec = np.average(losses), np.average(np.array(precs), axis=0)
@@ -232,8 +239,11 @@ def main(args):
             test_loss, test_prec = test_with_select(test_loader, override=cam, result_type=result_type)
             test_losses.append(test_loss)
             test_precs.append(test_prec)
+        diag_copy = lambda x: np.max(np.stack([np.swapaxes(x, 0, 1), x]), axis=0)
         val_losses, val_precs = np.array(val_losses), np.array(val_precs)
         test_losses, test_precs = np.array(test_losses), np.array(test_precs)
+        val_losses, val_precs = diag_copy(val_losses), diag_copy(val_precs)
+        test_losses, test_precs = diag_copy(test_losses), diag_copy(test_precs)
         test_precs_avg = test_precs[~np.eye(train_set.num_cam, dtype=bool)].mean(axis=0)
         loss_strategy = np.argmin(val_losses, axis=0)
         loss_strategy_precs = test_precs[loss_strategy, np.arange(train_set.num_cam)]
