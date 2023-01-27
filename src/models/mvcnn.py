@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 import torchvision.models as models
 import matplotlib.pyplot as plt
-from src.models.mvdet import CamPredModule
+from src.models.mvselect import CamPredModule
 
 
 class MVCNN(nn.Module):

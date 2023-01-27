@@ -13,7 +13,7 @@ from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
-from src.models.mvdet import softmax_to_hard, masked_softmax
+from src.models.mvselect import softmax_to_hard, masked_softmax
 
 
 class PerspectiveTrainer(object):

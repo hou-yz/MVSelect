@@ -7,35 +7,10 @@ import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
+from src.models.mvselect import CamPredModule
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
 import matplotlib.pyplot as plt
-
-
-def masked_softmax(input, dim=-1, mask=None, epsilon=1e-8):
-    if mask is None:
-        mask = torch.ones_like(input, dtype=torch.bool)
-    masked_exp = torch.exp(input) * mask.float()
-    masked_sum = masked_exp.sum(dim, keepdim=True) + epsilon
-    softmax = masked_exp / masked_sum
-    return softmax
-
-
-def gumbel_softmax(logits: torch.Tensor, tau: float = 1, dim: int = -1, mask: torch.Tensor = None) -> torch.Tensor:
-    # ~Gumbel(0,1)
-    gumbels = (-torch.empty_like(logits, memory_format=torch.legacy_contiguous_format).exponential_().log())
-    # ~Gumbel(logits,tau)
-    gumbels = (logits + gumbels) / tau
-    y_soft = masked_softmax(gumbels, dim, mask)
-
-    return y_soft
-
-
-def softmax_to_hard(y_soft, dim=-1):
-    index = y_soft.max(dim, keepdim=True)[1]
-    y_hard = torch.zeros_like(y_soft).scatter_(dim, index, 1.0)
-    ret = y_hard - y_soft.detach() + y_soft
-    return ret
 
 
 def fill_fc_weights(layers):
@@ -52,110 +27,6 @@ def output_head(in_dim, feat_dim, out_dim):
     else:
         fc = nn.Sequential(nn.Conv2d(in_dim, out_dim, 1))
     return fc
-
-
-def create_coord_map(img_size, with_r=False):
-    H, W = img_size
-    grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
-    grid_x = torch.from_numpy(grid_x / (W - 1) * 2 - 1).float()
-    grid_y = torch.from_numpy(grid_y / (H - 1) * 2 - 1).float()
-    ret = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0)
-    if with_r:
-        grid_r = torch.sqrt(torch.pow(grid_x, 2) + torch.pow(grid_y, 2)).view([1, 1, H, W])
-        ret = torch.cat([ret, grid_r], dim=1)
-    return ret
-
-
-def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
-    position = torch.arange(L).unsqueeze(1) / L * 2 * np.pi
-    div_term = torch.exp(torch.arange(0, hidden_dim, 2) / hidden_dim * (-np.log(temperature)))
-    pe = torch.zeros(L, hidden_dim)
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    return pe
-
-
-class CamPredModule(nn.Module):
-    def __init__(self, num_cam, hidden_dim, kernel_size=1, gumbel=True, random_select=False, aggregation='max'):
-        super().__init__()
-        self.cam_feat = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-                                      nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
-        self.kernel_size = kernel_size
-        # if kernel_size == 1:
-        #     stride, padding = 1, 0
-        # elif kernel_size == 3:
-        #     stride, padding = 2, 1
-        # else:
-        #     raise Exception
-        # self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(),
-        #                               nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(), )
-        # self.cam_feat[-2].weight.data.fill_(0)
-        # self.cam_feat[-2].bias.data.fill_(0)
-        # self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
-        self.cam_emb = nn.Embedding(num_cam, num_cam)
-        self.cam_emb.weight.data.fill_(0)
-        self.cam_pred = nn.Linear(hidden_dim, num_cam, bias=False)
-        self.cam_pred.weight.data.fill_(0)
-        self.gumbel = gumbel
-        self.random_select = random_select
-        self.aggregation = aggregation
-
-    def forward(self, feat, init_cam, keep_cams, hard=True, override=None):
-        B, N, C, H, W = feat.shape
-        # init_cam should be of shape [B, N] in binary form
-        if init_cam is None:
-            overall_feat, (cam_emb, cam_pred, overall_prob) = feat, (None, None, None)
-            overall_feat = overall_feat.mean(dim=1) if self.aggregation == 'mean' else overall_feat.max(dim=1)[0]
-            return overall_feat, (cam_emb, cam_pred, overall_prob)
-        elif isinstance(init_cam, int):
-            init_cam = F.one_hot(torch.tensor(init_cam).repeat(B), num_classes=N)
-        elif isinstance(init_cam, np.ndarray):
-            init_cam = F.one_hot(torch.tensor(init_cam), num_classes=N)
-        init_cam = init_cam.bool().to(feat.device)
-        if keep_cams is None:
-            keep_cams = torch.ones([B, N], dtype=torch.bool)
-        keep_cams = keep_cams.to(feat.device)
-        if self.training and hard is None:
-            hard = True
-        cam_candidate = ~init_cam & keep_cams
-        init_feat = feat * init_cam[:, :, None, None, None]
-        init_feat = init_feat.sum(dim=1) / init_cam.sum(dim=1) if self.aggregation == 'mean' \
-            else init_feat.max(dim=1)[0]
-        if override is None:
-            # cam_emb = F.layer_norm(init_cam.float() @ self.cam_emb.weight, [N])
-            cam_emb = F.layer_norm(self.cam_emb(init_cam.nonzero()[:, 1]), [N])
-            # cam_feat = self.cam_feat(init_feat[:, :, None, None] if len(init_feat.shape) == 2 else init_feat)
-            cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3]))
-            cam_pred = F.layer_norm(self.cam_pred(cam_feat), [N]) / 10
-            logits = cam_pred + cam_emb
-            # cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3])) + self.cam_emb[init_cam[:, 1]]
-            # logits = cam_pred = cam_emb = self.cam_pred(cam_feat)
-            if self.random_select:
-                logits = cam_pred = cam_emb = torch.randn([B, N], device=feat.device)
-            if self.training:
-                assert hard is True or hard is False, 'plz provide bool type {hard}'
-                # gumbel softmax trick
-                if self.gumbel:
-                    overall_prob = gumbel_softmax(logits, dim=1, mask=cam_candidate)
-                else:
-                    overall_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
-                overall_prob_hard = softmax_to_hard(overall_prob)
-            else:
-                overall_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
-                selected_cam = torch.argmax(overall_prob, dim=1)
-                overall_prob_hard = F.one_hot(selected_cam, num_classes=N)
-        else:
-            cam_pred = cam_emb = None
-            selected_cam = torch.ones([B], device=feat.device).long() * override
-            overall_prob = overall_prob_hard = F.one_hot(selected_cam, num_classes=N)
-
-        overall_prob = overall_prob_hard if hard is True or not self.training else overall_prob
-        if self.aggregation == 'mean':
-            overall_feat = (init_feat * init_cam.sum(1) + (feat * overall_prob[:, :, None, None, None]).sum(1)) / (
-                    init_cam + overall_prob).sum(1)
-        else:
-            overall_feat = torch.stack([init_feat, (feat * overall_prob[:, :, None, None, None]).sum(1)], 1).max(1)[0]
-        return overall_feat, (cam_emb, cam_pred, overall_prob)
 
 
 class MVDet(nn.Module):
