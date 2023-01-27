@@ -10,8 +10,7 @@ from src.models.mvdet import CamPredModule
 
 
 class MVCNN(nn.Module):
-    def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 gumbel=False, random_select=False):
+    def __init__(self, dataset, arch='resnet18', aggregation='max', gumbel=False, random_select=False):
         super().__init__()
         self.num_cam = dataset.num_cam
         self.aggregation = aggregation
@@ -35,30 +34,22 @@ class MVCNN(nn.Module):
         pass
 
     def forward(self, imgs, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
-        B, N, C, H, W = imgs.shape
-        if keep_cams is None:
-            keep_cams = torch.ones([B, N], dtype=torch.bool)
-        keep_cams = keep_cams.to(imgs.device)
-        if self.training and init_cam is not None and hard is None:
-            hard = False
-        imgs = imgs.view(B * N, C, H, W)
+        feat = self.get_feat(imgs)
+        overall_feat, selection_res = self.cam_pred(feat, init_cam, keep_cams, hard, override)
+        overall_result = self.get_output(overall_feat)
+        return overall_result, selection_res
 
+    def get_feat(self, imgs):
+        B, N, C, H, W = imgs.shape
+        imgs = imgs.view(B * N, C, H, W)
         imgs_feat = self.base(imgs)
         imgs_feat = self.avgpool(imgs_feat)
         _, C, H, W = imgs_feat.shape
-        imgs_feat = imgs_feat.view(B, N, C, H, W)
+        return imgs_feat.view(B, N, C, H, W)
 
-        # return imgs_feat
-        # def forward(self, imgs_feat, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
-
-        if init_cam is not None:
-            overall_feat, (cam_emb, cam_pred, cam_prob) = self.cam_pred(init_cam, imgs_feat, keep_cams, hard, override)
-        else:
-            overall_feat, (cam_emb, cam_pred, cam_prob) = imgs_feat, (None, None, None)
-        overall_feat = overall_feat.mean(dim=1) if self.aggregation == 'mean' else overall_feat.max(dim=1)[0]
+    def get_output(self, overall_feat):
         overall_result = self.classifier(torch.flatten(overall_feat, 1))
-
-        return overall_result, (cam_emb, cam_pred, cam_prob)
+        return overall_result
 
 
 if __name__ == '__main__':

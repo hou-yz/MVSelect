@@ -76,7 +76,7 @@ def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
 
 
 class CamPredModule(nn.Module):
-    def __init__(self, num_cam, hidden_dim, kernel_size=1, gumbel=False, random_select=False):
+    def __init__(self, num_cam, hidden_dim, kernel_size=1, gumbel=True, random_select=False, aggregation='max'):
         super().__init__()
         self.cam_feat = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
                                       nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
@@ -98,49 +98,64 @@ class CamPredModule(nn.Module):
         self.cam_pred.weight.data.fill_(0)
         self.gumbel = gumbel
         self.random_select = random_select
+        self.aggregation = aggregation
 
-    def forward(self, init_cam, world_feat, keep_cams, hard=True, override=None):
-        B, N, C, H, W = world_feat.shape
-        world_feat = world_feat.view([B * N, C, H, W])
-        if isinstance(init_cam, int):
-            init_cam = torch.cat([torch.arange(B, device=world_feat.device)[:, None],
-                                  torch.ones([B, 1], dtype=torch.long, device=world_feat.device) * init_cam], dim=1)
-        else:
-            init_cam = init_cam.to(world_feat.device)
-        cam_candidate = keep_cams[init_cam[:, 0]].scatter(1, init_cam[:, [1]], 0)
-        init_feat = world_feat[init_cam[:, 0] * N + init_cam[:, 1]]
+    def forward(self, feat, init_cam, keep_cams, hard=True, override=None):
+        B, N, C, H, W = feat.shape
+        # init_cam should be of shape [B, N] in binary form
+        if init_cam is None:
+            overall_feat, (cam_emb, cam_pred, overall_prob) = feat, (None, None, None)
+            overall_feat = overall_feat.mean(dim=1) if self.aggregation == 'mean' else overall_feat.max(dim=1)[0]
+            return overall_feat, (cam_emb, cam_pred, overall_prob)
+        elif isinstance(init_cam, int):
+            init_cam = F.one_hot(torch.tensor(init_cam).repeat(B), num_classes=N)
+        elif isinstance(init_cam, np.ndarray):
+            init_cam = F.one_hot(torch.tensor(init_cam), num_classes=N)
+        init_cam = init_cam.bool().to(feat.device)
+        if keep_cams is None:
+            keep_cams = torch.ones([B, N], dtype=torch.bool)
+        keep_cams = keep_cams.to(feat.device)
+        if self.training and hard is None:
+            hard = True
+        cam_candidate = ~init_cam & keep_cams
+        init_feat = feat * init_cam[:, :, None, None, None]
+        init_feat = init_feat.sum(dim=1) / init_cam.sum(dim=1) if self.aggregation == 'mean' \
+            else init_feat.max(dim=1)[0]
         if override is None:
-            if not self.random_select:
-                cam_emb = F.layer_norm(self.cam_emb(init_cam[:, 1]), [N])
-                # cam_feat = self.cam_feat(init_feat[:, :, None, None] if len(init_feat.shape) == 2 else init_feat)
-                cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3]))
-                cam_pred = F.layer_norm(self.cam_pred(cam_feat), [N]) / 10
-                logits = cam_pred + cam_emb
-                # cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3])) + self.cam_emb[init_cam[:, 1]]
-                # logits = cam_pred = cam_emb = self.cam_pred(cam_feat)
-            else:
-                logits = cam_pred = cam_emb = torch.randn([init_cam.shape[0], N], device=world_feat.device)
+            # cam_emb = F.layer_norm(init_cam.float() @ self.cam_emb.weight, [N])
+            cam_emb = F.layer_norm(self.cam_emb(init_cam.nonzero()[:, 1]), [N])
+            # cam_feat = self.cam_feat(init_feat[:, :, None, None] if len(init_feat.shape) == 2 else init_feat)
+            cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3]))
+            cam_pred = F.layer_norm(self.cam_pred(cam_feat), [N]) / 10
+            logits = cam_pred + cam_emb
+            # cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3])) + self.cam_emb[init_cam[:, 1]]
+            # logits = cam_pred = cam_emb = self.cam_pred(cam_feat)
+            if self.random_select:
+                logits = cam_pred = cam_emb = torch.randn([B, N], device=feat.device)
             if self.training:
                 assert hard is True or hard is False, 'plz provide bool type {hard}'
                 # gumbel softmax trick
                 if self.gumbel:
-                    cam_prob = gumbel_softmax(logits, dim=1, mask=cam_candidate)
+                    overall_prob = gumbel_softmax(logits, dim=1, mask=cam_candidate)
                 else:
-                    cam_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
-                cam_prob_hard = softmax_to_hard(cam_prob)
+                    overall_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
+                overall_prob_hard = softmax_to_hard(overall_prob)
             else:
-                cam_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
-                selected_cam = torch.argmax(cam_prob, dim=1)
-                cam_prob_hard = torch.zeros_like(cam_prob).scatter_(1, selected_cam[:, None], 1.)
+                overall_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
+                selected_cam = torch.argmax(overall_prob, dim=1)
+                overall_prob_hard = F.one_hot(selected_cam, num_classes=N)
         else:
-            logits = cam_pred = cam_emb = torch.randn([init_cam.shape[0], N], device=world_feat.device)
-            selected_cam = torch.ones(init_cam.shape[0], device=world_feat.device).long() * override
-            cam_prob = cam_prob_hard = torch.zeros_like(logits).scatter_(1, selected_cam[:, None], 1.)
+            cam_pred = cam_emb = None
+            selected_cam = torch.ones([B], device=feat.device).long() * override
+            overall_prob = overall_prob_hard = F.one_hot(selected_cam, num_classes=N)
 
-        select_feat = world_feat.view(B, N, C, H, W)[init_cam[:, 0]] * \
-                      (cam_prob_hard if hard is True or not self.training else cam_prob)[:, :, None, None, None]
-        world_feat = torch.stack([init_feat, select_feat.sum(dim=1)], dim=1)
-        return world_feat, (cam_emb, cam_pred, cam_prob_hard if hard is True or not self.training else cam_prob)
+        overall_prob = overall_prob_hard if hard is True or not self.training else overall_prob
+        if self.aggregation == 'mean':
+            overall_feat = (init_feat * init_cam.sum(1) + (feat * overall_prob[:, :, None, None, None]).sum(1)) / (
+                    init_cam + overall_prob).sum(1)
+        else:
+            overall_feat = torch.stack([init_feat, (feat * overall_prob[:, :, None, None, None]).sum(1)], 1).max(1)[0]
+        return overall_feat, (cam_emb, cam_pred, overall_prob)
 
 
 class MVDet(nn.Module):
@@ -181,7 +196,7 @@ class MVDet(nn.Module):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         if use_bottleneck:
-            self.bottleneck = nn.Conv2d(base_dim, hidden_dim, 1)
+            self.bottleneck = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 1), nn.ReLU())
             base_dim = hidden_dim
         else:
             self.bottleneck = nn.Identity()
@@ -216,13 +231,13 @@ class MVDet(nn.Module):
         pass
 
     def forward(self, imgs, M, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
+        imgs_feat, world_feat = self.get_feat(imgs, M, visualize)
+        world_feat, selection_res = self.cam_pred(world_feat, init_cam, keep_cams, hard, override)
+        world_res, imgs_res = self.get_output(imgs_feat, world_feat)
+        return world_res, imgs_res, selection_res
+
+    def get_feat(self, imgs, M, visualize=False):
         B, N, _, H, W = imgs.shape
-        if keep_cams is None:
-            keep_cams = torch.ones([B, N], dtype=torch.bool)
-        keep_cams = keep_cams.to(imgs.device)
-        if self.training and init_cam is not None and hard is None:
-            hard = True
-        # B = init_cam.shape
         imgs = imgs.view(B * N, -1, H, W)
 
         inverse_affine_mats = torch.inverse(M.view([B * N, 3, 3]))
@@ -249,6 +264,7 @@ class MVDet(nn.Module):
 
         imgs_feat = self.base(imgs)
         imgs_feat = self.bottleneck(imgs_feat)
+
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
@@ -256,36 +272,30 @@ class MVDet(nn.Module):
                 plt.imshow(visualize_img)
                 plt.show()
 
-        # img heads
-        _, C, H, W = imgs_feat.shape
-        imgs_heatmap = self.img_heatmap(imgs_feat)
-        imgs_offset = self.img_offset(imgs_feat)
-        imgs_wh = self.img_wh(imgs_feat)
-
         # world feat
         H, W = self.Rworld_shape
-        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape,
+        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), (H, W),
                                       align_corners=False).view(B, N, -1, H, W)
+
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(world_feat[0, cam].detach(), dim=0).cpu())
                 visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
-        # return world_feat
-        # def forward(self, world_feat, M, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
 
         # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
 
-        if init_cam is not None:
-            world_feat, (cam_emb, cam_pred, cam_prob) = self.cam_pred(init_cam, world_feat, keep_cams, hard, override)
-        else:
-            cam_emb, cam_pred, cam_prob = None, None, None
-        world_feat = world_feat.mean(dim=1) if self.aggregation == 'mean' else world_feat.max(dim=1)[0]
-        # world_feat = torch.cat([world_feat, self.coord_map.repeat([world_feat.shape[0], 1, 1, 1]).to(imgs.device)], 1)
-        world_feat = self.world_feat(world_feat)
+        return imgs_feat, world_feat
+
+    def get_output(self, imgs_feat, world_feat, visualize=False):
+        # img heads
+        imgs_heatmap = self.img_heatmap(imgs_feat)
+        imgs_offset = self.img_offset(imgs_feat)
+        imgs_wh = self.img_wh(imgs_feat)
 
         # world heads
+        world_feat = self.world_feat(world_feat)
         world_heatmap = self.world_heatmap(world_feat)
         world_offset = self.world_offset(world_feat)
         # world_id = self.world_id(world_feat)
@@ -299,7 +309,8 @@ class MVDet(nn.Module):
             visualize_img.save(f'../../imgs/worldres.png')
             plt.imshow(visualize_img)
             plt.show()
-        return (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), (cam_emb, cam_pred, cam_prob)
+
+        return (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh)
 
 
 def test():
@@ -317,20 +328,21 @@ def test():
     model = MVDet(dataset)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     keep_cams[0, 3] = 0
+    init_cam = 5
     model.train()
+    (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, init_cam, keep_cams)
+    xysc_train = ctdet_decode(world_heatmap, world_offset)
+    model.eval()
+    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
+        model(imgs, affine_mats, init_cam, override=5)
+    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
+        model(imgs, affine_mats, init_cam, override=5)
+    xysc_eval = ctdet_decode(world_heatmap, world_offset)
     # macs, params = profile(model, inputs=(imgs[:, :2], affine_mats))
-    macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))
-
-    print(f'{macs}')
-    print(f'{params}')
-    # (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, keep_cams.nonzero(), keep_cams)
-    # xysc_train = ctdet_decode(world_heatmap, world_offset)
-    # model.eval()
-    # (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-    #     model(imgs, affine_mats, 2, override=5)
-    # (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-    #     model(imgs, affine_mats, keep_cams.nonzero(), override=5)
-    # xysc_eval = ctdet_decode(world_heatmap, world_offset)
+    # macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))
+    #
+    # print(f'{macs}')
+    # print(f'{params}')
     pass
 
 
