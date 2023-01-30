@@ -33,9 +33,9 @@ class MVCNN(nn.Module):
         self.cam_pred = CamPredModule(dataset.num_cam, base_dim, 1, gumbel, random_select)
         pass
 
-    def forward(self, imgs, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
+    def forward(self, imgs, init_prob=None, keep_cams=None, hard=None, override=None, visualize=False):
         feat = self.get_feat(imgs)
-        overall_feat, selection_res = self.cam_pred(feat, init_cam, keep_cams, hard, override)
+        overall_feat, selection_res = self.cam_pred(feat, init_prob, keep_cams, hard, override)
         overall_result = self.get_output(overall_feat)
         return overall_result, selection_res
 
@@ -50,6 +50,13 @@ class MVCNN(nn.Module):
     def get_output(self, overall_feat):
         overall_result = self.classifier(torch.flatten(overall_feat, 1))
         return overall_result
+
+    def test_cam_combination(self, imgs, init_prob):
+        feat = self.get_feat(imgs)
+        result_dict = {}
+        for cam in range(self.num_cam):
+            select_prob = F.one_hot(torch.tensor(cam), num_classes=self.num_cam).to(imgs.device)
+            
 
 
 if __name__ == '__main__':

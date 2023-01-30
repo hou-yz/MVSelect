@@ -101,10 +101,10 @@ class MVDet(nn.Module):
         fill_fc_weights(self.world_offset)
         pass
 
-    def forward(self, imgs, M, init_cam=None, keep_cams=None, hard=None, override=None, visualize=False):
+    def forward(self, imgs, M, init_prob=None, keep_cams=None, hard=None, override=None, visualize=False):
         imgs_feat, world_feat = self.get_feat(imgs, M, visualize)
-        world_feat, selection_res = self.cam_pred(world_feat, init_cam, keep_cams, hard, override)
-        world_res, imgs_res = self.get_output(imgs_feat, world_feat)
+        world_feat, selection_res = self.cam_pred(world_feat, init_prob, keep_cams, hard, override)
+        imgs_res, world_res = self.get_output(imgs_feat, world_feat)
         return world_res, imgs_res, selection_res
 
     def get_feat(self, imgs, M, visualize=False):
@@ -181,7 +181,7 @@ class MVDet(nn.Module):
             plt.imshow(visualize_img)
             plt.show()
 
-        return (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh)
+        return (imgs_heatmap, imgs_offset, imgs_wh), (world_heatmap, world_offset)
 
 
 def test():
@@ -199,7 +199,7 @@ def test():
     model = MVDet(dataset)
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     keep_cams[0, 3] = 0
-    init_cam = 5
+    init_cam = 0
     model.train()
     (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, init_cam, keep_cams)
     xysc_train = ctdet_decode(world_heatmap, world_offset)
@@ -207,7 +207,7 @@ def test():
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
         model(imgs, affine_mats, init_cam, override=5)
     (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-        model(imgs, affine_mats, init_cam, override=5)
+        model(imgs, affine_mats, init_cam, keep_cams, override=3)
     xysc_eval = ctdet_decode(world_heatmap, world_offset)
     # macs, params = profile(model, inputs=(imgs[:, :2], affine_mats))
     # macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))

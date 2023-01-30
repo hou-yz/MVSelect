@@ -27,20 +27,20 @@ class ClassifierTrainer(object):
             self.model.base.eval()
         losses, correct, miss = 0, 0, 1e-8
         t0 = time.time()
-        overall_prob_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
+        select_prob_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
         # cam_pred_ema = torch.zeros([dataloader.dataset.num_cam]).cuda()
         cam_pred_ema = torch.zeros([dataloader.dataset.num_cam, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
             if self.args.select:
-                init_cam = np.concatenate([np.random.choice(
+                init_prob = np.concatenate([np.random.choice(
                     keep_cams[b].nonzero().squeeze(), 1, replace=False) for b in range(B)])
-                init_cam = F.one_hot(torch.tensor(init_cam), num_classes=N).cuda()
+                init_prob = F.one_hot(torch.tensor(init_prob), num_classes=N).cuda()
             else:
-                init_cam = None
+                init_prob = None
             reg_conf, reg_even = None, None
-            output, (cam_emb, cam_pred, overall_prob) = self.model(imgs, init_cam, keep_cams, hard)
+            output, (cam_emb, cam_pred, select_prob) = self.model(imgs, init_prob, keep_cams, hard)
             loss = self.ce_loss(output, tgt)
 
             pred = torch.argmax(output, 1)
@@ -57,8 +57,8 @@ class ClassifierTrainer(object):
                 #     cam_pred_ema = cam_pred_ema * 0.99 + cam_pred.mean(dim=0).detach() * 0.01
                 # reg_even = -(cam_pred_ema - cam_pred.mean(dim=0)).norm()
                 reg_even = 0
-                for b in range(len(init_cam)):
-                    cam = init_cam[b, 1].item()
+                for b in range(len(init_prob)):
+                    cam = init_prob[b, 1].item()
                     if cam_pred_ema[cam].sum().item() == 0:
                         cam_pred_ema[cam] = cam_pred[b].detach()
                     reg_even += -(cam_pred_ema[cam] - cam_pred[b]).norm()
@@ -67,7 +67,7 @@ class ClassifierTrainer(object):
                 # loss
                 loss = loss + reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
                 # record
-                overall_prob_sum += overall_prob.detach().sum(dim=0)
+                select_prob_sum += select_prob.detach().sum(dim=0)
 
             optimizer.zero_grad()
             loss.backward()
@@ -88,15 +88,15 @@ class ClassifierTrainer(object):
                 t_epoch = t1 - t0
                 print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, '
                       f'loss: {losses / (batch_idx + 1):.3f}, prec: {100. * correct / (correct + miss):.1f}%, '
-                      f'Time: {t_epoch:.1f}' + (f', prob: {overall_prob.detach().max(dim=1)[0].mean().item():.3f}, '
+                      f'Time: {t_epoch:.1f}' + (f', prob: {select_prob.detach().max(dim=1)[0].mean().item():.3f}, '
                                                 f'reg_conf: {reg_conf.item():.3f}, reg_even: {reg_even.item():.3f}'
-                                                if self.args.select and init_cam is not None else ''))
+                                                if self.args.select and init_prob is not None else ''))
                 if self.args.select:
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                                   zip(range(N), F.normalize(overall_prob_sum, p=1, dim=0).cpu())))
+                                   zip(range(N), F.normalize(select_prob_sum, p=1, dim=0).cpu())))
                 pass
-            del imgs, keep_cams, init_cam
-            del cam_emb, cam_pred, overall_prob
+            del imgs, keep_cams, init_prob
+            del cam_emb, cam_pred, select_prob
             del loss, output, tgt, pred
             del reg_conf, reg_even
         return losses / len(dataloader), correct / (correct + miss) * 100.0
@@ -111,10 +111,10 @@ class ClassifierTrainer(object):
             imgs, tgt = imgs.cuda(), tgt.cuda()
             # with autocast():
             with torch.no_grad():
-                output, (cam_emb, cam_pred, overall_prob) = self.model(imgs, init_cam, override=override)
+                output, (cam_emb, cam_pred, select_prob) = self.model(imgs, init_cam, override=override)
             loss = self.ce_loss(output, tgt)
             if init_cam is not None:
-                selected_cams.extend(overall_prob.argmax(dim=1).detach().cpu().numpy().tolist())
+                selected_cams.extend(select_prob.argmax(dim=1).detach().cpu().numpy().tolist())
 
             losses += loss.item()
 
