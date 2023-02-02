@@ -27,8 +27,9 @@ def evaluateDetection_py(det, gt, frames=None):
     if det.shape == (3,):
         det = det[None, :]
 
-    if frames is not None:
-        gt = gt[np.isin(gt[:, 0], frames), :]
+    if frames is None:
+        frames = np.unique(det[:, 0])
+    gt = gt[np.isin(gt[:, 0], frames), :]
 
     MODA, MODP, precision, recall, (tp, fp, fn, gt, dist) = CLEAR_MOD_HUN(gt, det)
     return MODA, MODP, precision, recall, (tp, fp, fn, gt, dist)
