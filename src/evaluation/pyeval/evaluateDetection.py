@@ -26,9 +26,11 @@ def evaluateDetection_py(det, gt, frames=None):
         det = np.array(det)
     if det.shape == (3,):
         det = det[None, :]
+    elif det.shape == (0,):
+        det = det.reshape([0, 3])
 
     if frames is None:
-        frames = np.unique(det[:, 0])
+        frames = np.unique(det[:, 0]) if len(det) else np.unique(gt[:, 0])
     gt = gt[np.isin(gt[:, 0], frames), :]
 
     MODA, MODP, precision, recall, (tp, fp, fn, gt, dist) = CLEAR_MOD_HUN(gt, det)
