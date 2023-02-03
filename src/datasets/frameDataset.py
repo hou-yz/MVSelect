@@ -106,15 +106,17 @@ class frameDataset(VisionDataset):
                                             align_corners=False)
         self.Rworld_coverage = self.get_world_coverage().bool()
 
-        self.get_image_fpaths(frame_range)
-        self.get_gt_targets(split if split == 'trainval' else f'{split} \t', frame_range)
+        self.img_fpaths = self.get_image_fpaths(frame_range)
+        self.world_gt, self.imgs_gt, self.pid_dict, self.frames = self.get_gt_targets(
+            split if split == 'trainval' else f'{split} \t', frame_range)
         # gt in mot format for evaluation
-        if not os.path.exists(os.path.join(self.root, 'gt_0.txt')) or force_download:
+        self.gt_fname = f'{self.root}/gt'
+        if not os.path.exists(f'{self.gt_fname}.txt') or force_download:
             self.prepare_gt()
         pass
 
     def get_image_fpaths(self, frame_range):
-        self.img_fpaths = {cam: {} for cam in range(self.num_cam)}
+        img_fpaths = {cam: {} for cam in range(self.num_cam)}
         for camera_folder in sorted(os.listdir(os.path.join(self.root, 'Image_subsets'))):
             cam = int(camera_folder[-1]) - 1
             if cam >= self.num_cam:
@@ -122,46 +124,49 @@ class frameDataset(VisionDataset):
             for fname in sorted(os.listdir(os.path.join(self.root, 'Image_subsets', camera_folder))):
                 frame = int(fname.split('.')[0])
                 if frame in frame_range:
-                    self.img_fpaths[cam][frame] = os.path.join(self.root, 'Image_subsets', camera_folder, fname)
+                    img_fpaths[cam][frame] = os.path.join(self.root, 'Image_subsets', camera_folder, fname)
+        return img_fpaths
 
     def get_gt_targets(self, split, frame_range):
-        self.world_gt = {}
-        self.imgs_gt = {}
-        self.pid_dict = {}
-        num_frame, num_world_bbox, num_imgs_bbox = 0, 0, 0
+        num_world_bbox, num_imgs_bbox = 0, 0
+        world_gt = {}
+        imgs_gt = {}
+        pid_dict = {}
+        frames = []
         for fname in sorted(os.listdir(os.path.join(self.root, 'annotations_positions'))):
             frame = int(fname.split('.')[0])
             if frame in frame_range:
-                num_frame += 1
+                frames.append(frame)
                 with open(os.path.join(self.root, 'annotations_positions', fname)) as json_file:
                     all_pedestrians = json.load(json_file)
                 world_pts, world_pids = [], []
                 img_bboxs, img_pids = [[] for _ in range(self.num_cam)], [[] for _ in range(self.num_cam)]
                 for pedestrian in all_pedestrians:
                     grid_x, grid_y = self.base.get_worldgrid_from_pos(pedestrian['positionID']).squeeze()
-                    if pedestrian['personID'] not in self.pid_dict:
-                        self.pid_dict[pedestrian['personID']] = len(self.pid_dict)
+                    if pedestrian['personID'] not in pid_dict:
+                        pid_dict[pedestrian['personID']] = len(pid_dict)
                     num_world_bbox += 1
                     if self.base.indexing == 'xy':
                         world_pts.append((grid_x, grid_y))
                     else:
                         world_pts.append((grid_y, grid_x))
-                    world_pids.append(self.pid_dict[pedestrian['personID']])
+                    world_pids.append(pid_dict[pedestrian['personID']])
                     for cam in range(self.num_cam):
                         if itemgetter('xmin', 'ymin', 'xmax', 'ymax')(pedestrian['views'][cam]) != (-1, -1, -1, -1):
                             img_bboxs[cam].append(itemgetter('xmin', 'ymin', 'xmax', 'ymax')
                                                   (pedestrian['views'][cam]))
-                            img_pids[cam].append(self.pid_dict[pedestrian['personID']])
+                            img_pids[cam].append(pid_dict[pedestrian['personID']])
                             num_imgs_bbox += 1
-                self.world_gt[frame] = (np.array(world_pts), np.array(world_pids))
-                self.imgs_gt[frame] = {}
+                world_gt[frame] = (np.array(world_pts), np.array(world_pids))
+                imgs_gt[frame] = {}
                 for cam in range(self.num_cam):
                     # x1y1x2y2
-                    self.imgs_gt[frame][cam] = (np.array(img_bboxs[cam]), np.array(img_pids[cam]))
+                    imgs_gt[frame][cam] = (np.array(img_bboxs[cam]), np.array(img_pids[cam]))
 
-        print(f'{split}:\t pid: {len(self.pid_dict)}, frame: {num_frame}, '
-              f'world bbox: {num_world_bbox / num_frame:.1f}, '
-              f'imgs bbox per cam: {num_imgs_bbox / num_frame / self.num_cam:.1f}')
+        print(f'{split}:\t pid: {len(pid_dict)}, frame: {len(frames)}, '
+              f'world bbox: {num_world_bbox / len(frames):.1f}, '
+              f'imgs bbox per cam: {num_imgs_bbox / len(frames) / self.num_cam:.1f}')
+        return world_gt, imgs_gt, pid_dict, frames
 
     def get_world_coverage(self):
         # world grid change to xy indexing
@@ -229,9 +234,9 @@ class frameDataset(VisionDataset):
                     if is_in_cam(cam, grid_x, grid_y):
                         og_gt[cam].append(np.array([frame, grid_x, grid_y]))
         og_gt = [np.stack(og_gt[cam], axis=0) for cam in range(self.num_cam)]
-        np.savetxt(f'{self.root}/gt.txt', np.unique(np.concatenate(og_gt, axis=0), axis=0), '%d')
+        np.savetxt(f'{self.gt_fname}.txt', np.unique(np.concatenate(og_gt, axis=0), axis=0), '%d')
         for cam in range(self.num_cam):
-            np.savetxt(f'{self.root}/gt_{cam}.txt', og_gt[cam], '%d')
+            np.savetxt(f'{self.gt_fname}_{cam}.txt', og_gt[cam], '%d')
 
     def __getitem__(self, index, visualize=False):
         def plt_visualize():
