@@ -8,6 +8,7 @@ from kornia.geometry import warp_perspective
 from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
 from src.models.mvselect import CamPredModule
+from src.models.multiview_base import MultiviewBase
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
 import matplotlib.pyplot as plt
@@ -29,14 +30,13 @@ def output_head(in_dim, feat_dim, out_dim):
     return fc
 
 
-class MVDet(nn.Module):
+class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
                  use_bottleneck=True, hidden_dim=128, outfeat_dim=0, z=0,
                  gumbel=False, random_select=False):
-        super().__init__()
+        super().__init__(dataset, aggregation)
         self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
         self.img_reduce = dataset.img_reduce
-        self.num_cam = dataset.num_cam
 
         # world grid change to xy indexing
         world_zoom_mat = np.diag([dataset.world_reduce, dataset.world_reduce, 1])
@@ -72,8 +72,6 @@ class MVDet(nn.Module):
         else:
             self.bottleneck = nn.Identity()
 
-        self.aggregation = aggregation
-
         # img heads
         self.img_heatmap = output_head(base_dim, outfeat_dim, 1)
         self.img_offset = output_head(base_dim, outfeat_dim, 2)
@@ -101,15 +99,9 @@ class MVDet(nn.Module):
         fill_fc_weights(self.world_offset)
         pass
 
-    def forward(self, imgs, M, init_prob=None, keep_cams=None, hard=None, override=None, visualize=False):
-        imgs_feat, world_feat = self.get_feat(imgs, M, visualize)
-        world_feat, selection_res = self.cam_pred(world_feat, init_prob, keep_cams, hard, override)
-        imgs_res, world_res = self.get_output(imgs_feat, world_feat)
-        return world_res, imgs_res, selection_res
-
     def get_feat(self, imgs, M, visualize=False):
         B, N, _, H, W = imgs.shape
-        imgs = imgs.view(B * N, -1, H, W)
+        imgs = imgs.flatten(0, 1)
 
         inverse_affine_mats = torch.inverse(M.view([B * N, 3, 3]))
         # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
@@ -122,8 +114,7 @@ class MVDet(nn.Module):
         if visualize:
             denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
             proj_imgs = warp_perspective(T.Resize(self.Rimg_shape)(imgs), proj_mats.to(imgs.device),
-                                         self.Rworld_shape, align_corners=False). \
-                view(B, N, 3, self.Rworld_shape[0], self.Rworld_shape[1])
+                                         self.Rworld_shape, align_corners=False).unflatten(0, [B, N])
             for cam in range(N):
                 visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
                 visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
@@ -136,6 +127,11 @@ class MVDet(nn.Module):
         imgs_feat = self.base(imgs)
         imgs_feat = self.bottleneck(imgs_feat)
 
+        # img heads
+        imgs_heatmap = self.img_heatmap(imgs_feat)
+        imgs_offset = self.img_offset(imgs_feat)
+        imgs_wh = self.img_wh(imgs_feat)
+
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
@@ -146,7 +142,7 @@ class MVDet(nn.Module):
         # world feat
         H, W = self.Rworld_shape
         world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), (H, W),
-                                      align_corners=False).view(B, N, -1, H, W)
+                                      align_corners=False).unflatten(0, [B, N])
 
         if visualize:
             for cam in range(N):
@@ -156,14 +152,9 @@ class MVDet(nn.Module):
                 plt.show()
 
         # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
+        return world_feat, (imgs_heatmap, imgs_offset, imgs_wh)
 
-        return imgs_feat, world_feat
-
-    def get_output(self, imgs_feat, world_feat, visualize=False):
-        # img heads
-        imgs_heatmap = self.img_heatmap(imgs_feat)
-        imgs_offset = self.img_offset(imgs_feat)
-        imgs_wh = self.img_wh(imgs_feat)
+    def get_output(self, world_feat, visualize=False):
 
         # world heads
         world_feat = self.world_feat(world_feat)
@@ -181,7 +172,7 @@ class MVDet(nn.Module):
             plt.imshow(visualize_img)
             plt.show()
 
-        return (imgs_heatmap, imgs_offset, imgs_wh), (world_heatmap, world_offset)
+        return world_heatmap, world_offset
 
 
 def test():
@@ -194,21 +185,21 @@ def test():
     from thop import profile
 
     dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')
-    dataloader = DataLoader(dataset, 1, False, num_workers=0)
+    dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
-    model = MVDet(dataset)
+    model = MVDet(dataset).cuda()
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     keep_cams[0, 3] = 0
     init_cam = 0
-    model.train()
-    (world_heatmap, world_offset), _, cam_train = model(imgs, affine_mats, init_cam, keep_cams)
-    xysc_train = ctdet_decode(world_heatmap, world_offset)
-    model.eval()
-    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-        model(imgs, affine_mats, init_cam, override=5)
-    (world_heatmap, world_offset), (imgs_heatmap, imgs_offset, imgs_wh), cam_eval = \
-        model(imgs, affine_mats, init_cam, keep_cams, override=3)
-    xysc_eval = ctdet_decode(world_heatmap, world_offset)
+    # model.train()
+    # (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, init_cam, keep_cams)
+    # xysc_train = ctdet_decode(world_heatmap, world_offset)
+    # model.eval()
+    # (world_heatmap, world_offset), _, cam_eval = model(imgs.cuda(), affine_mats, init_cam, keep_cams, override=3)
+    # xysc_eval = ctdet_decode(world_heatmap, world_offset)
+    init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
+    with torch.no_grad():
+        cam_combination_results = model.forward_override_combination(imgs.cuda(), affine_mats, init_prob)
     # macs, params = profile(model, inputs=(imgs[:, :2], affine_mats))
     # macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))
     #

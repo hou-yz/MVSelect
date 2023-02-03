@@ -6,14 +6,14 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 import torchvision.models as models
 import matplotlib.pyplot as plt
+from src.models.multiview_base import MultiviewBase
 from src.models.mvselect import CamPredModule
 
 
-class MVCNN(nn.Module):
-    def __init__(self, dataset, arch='resnet18', aggregation='max', gumbel=False, random_select=False):
-        super().__init__()
-        self.num_cam = dataset.num_cam
-        self.aggregation = aggregation
+
+class MVCNN(MultiviewBase):
+    def __init__(self, dataset, arch='resnet18', aggregation='max', gumbel=True, random_select=False):
+        super().__init__(dataset, aggregation, )
 
         if arch == 'resnet18':
             self.base = nn.Sequential(*list(models.resnet18(pretrained=True).children())[:-2])
@@ -33,30 +33,16 @@ class MVCNN(nn.Module):
         self.cam_pred = CamPredModule(dataset.num_cam, base_dim, 1, gumbel, random_select)
         pass
 
-    def forward(self, imgs, init_prob=None, keep_cams=None, hard=None, override=None, visualize=False):
-        feat = self.get_feat(imgs)
-        overall_feat, selection_res = self.cam_pred(feat, init_prob, keep_cams, hard, override)
-        overall_result = self.get_output(overall_feat)
-        return overall_result, selection_res
-
-    def get_feat(self, imgs):
+    def get_feat(self, imgs, M, visualize=False):
         B, N, C, H, W = imgs.shape
-        imgs = imgs.view(B * N, C, H, W)
-        imgs_feat = self.base(imgs)
+        imgs_feat = self.base(imgs.flatten(0, 1))
         imgs_feat = self.avgpool(imgs_feat)
         _, C, H, W = imgs_feat.shape
-        return imgs_feat.view(B, N, C, H, W)
+        return imgs_feat.unflatten(0, [B, N]), None
 
-    def get_output(self, overall_feat):
+    def get_output(self, overall_feat, visualize=False):
         overall_result = self.classifier(torch.flatten(overall_feat, 1))
         return overall_result
-
-    def test_cam_combination(self, imgs, init_prob):
-        feat = self.get_feat(imgs)
-        result_dict = {}
-        for cam in range(self.num_cam):
-            select_prob = F.one_hot(torch.tensor(cam), num_classes=self.num_cam).to(imgs.device)
-            
 
 
 if __name__ == '__main__':
@@ -65,17 +51,19 @@ if __name__ == '__main__':
     from thop import profile
 
     dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v2png_ori4', 20)
-    dataloader = DataLoader(dataset, 1, False, num_workers=0)
+    dataloader = DataLoader(dataset, 2, False, num_workers=0)
     imgs, tgt, keep_cams = next(iter(dataloader))
-    model = MVCNN(dataset)
-    macs, params = profile(model, inputs=(imgs[:, ],))
-
-    print(f'{macs}')
-    print(f'{params}')
-    # keep_cams[0, 3] = 0
+    model = MVCNN(dataset).cuda()
+    init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
+    keep_cams[0, 3] = 0
     # model.train()
-    # res = model(imgs, keep_cams.nonzero(), keep_cams)
+    # res = model(imgs.cuda(), None, init_prob, keep_cams)
     # model.eval()
-    # res = model(imgs, 2, override=5)
-    # res = model(imgs, keep_cams.nonzero(), override=5)
+    # res = model(imgs.cuda(), None, init_prob, override=5)
+    with torch.no_grad():
+        cam_combination_results = model.forward_override_combination(imgs.cuda(), None, 1)
+    # macs, params = profile(model, inputs=(imgs[:, ],))
+    #
+    # print(f'{macs}')
+    # print(f'{params}')
     pass
