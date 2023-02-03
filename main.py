@@ -180,27 +180,40 @@ def main(args):
     else:
         trainer = PerspectiveTrainer(model, logdir, args)
 
-    def test_with_select(dataloader, override=None, result_type=['prec']):
+    def test_select(dataloader, result_type=('prec',)):
         t0 = time.time()
-        losses, precs = [], []
-        for init_cam in range(train_set.num_cam) if args.select or override is not None else [None]:
-            if isinstance(init_cam, int):
-                print(f'init camera {init_cam}:')
-                if override is not None and init_cam > override:
-                    loss, prec = 0, [0, ] if args.task == 'mvcnn' else [0, 0, 0, 0, ]
-                else:
-                    loss, prec = trainer.test(dataloader, init_cam, override)
-            else:
-                print(f'using all cameras:')
-                loss, prec = trainer.test(dataloader, init_cam, override)
-            losses.append(loss)
-            precs.append(prec)
-        loss, prec = np.average(losses), np.average(np.array(precs), axis=0)
+        if args.select:
+            loss_s, prec_s = [], []
+            for init_cam in range(train_set.num_cam):
+                print(f'init camera {init_cam}: MVSelect')
+                loss, prec = trainer.test(dataloader, init_cam)
+                loss_s.append(loss)
+                prec_s.append(prec)
+            loss, prec = np.average(loss_s), np.average(np.array(prec_s), axis=0)
+        else:
+            print(f'using all cameras:')
+            loss, prec = trainer.test(dataloader)
         result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, prec))
         print(f'average {result_str}\t loss: {loss:.6f}, time: {time.time() - t0:.1f}')
-        if override is not None:
-            return losses, precs
         return loss, prec
+
+    def test_override(dataloader, result_type=('prec',)):
+        loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s = [], [], []
+        for init_cam in range(train_set.num_cam):
+            t0 = time.time()
+            print(f'init camera {init_cam}: override')
+            loss, instance_lvl_max_prec, dataset_lvl_prec = trainer.test_cam_combination(dataloader, init_cam)
+            loss_s.append(loss)
+            instance_lvl_max_prec_s.append(instance_lvl_max_prec)
+            dataset_lvl_prec_s.append(dataset_lvl_prec)
+            result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec))
+            print(f'oracle {result_str} \t time: {time.time() - t0:.1f}s')
+        instance_lvl_max_prec_s = np.array(instance_lvl_max_prec_s)
+        result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec_s.mean(0)))
+        print('*************************************')
+        print(f'oracle average {result_str}')
+        print('*************************************')
+        return loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s
 
     # draw curve
     x_epoch = []
@@ -217,7 +230,7 @@ def main(args):
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler, hard=args.hard, )
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
-                test_loss, test_prec = test_with_select(test_loader, result_type=result_type)
+                test_loss, test_prec = test_select(test_loader, result_type=result_type)
 
                 # draw & save
                 x_epoch.append(epoch)
@@ -229,38 +242,28 @@ def main(args):
                            train_prec_s if args.task == 'mvcnn' else None, test_prec_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
-    def log_best2cam_strategy(result_type=['prec']):
-        val_losses, val_precs = [], []
-        test_losses, test_precs = [], []
-        for cam in range(train_set.num_cam):
-            val_loss, val_prec = test_with_select(val_loader, override=cam, result_type=result_type)
-            val_losses.append(val_loss)
-            val_precs.append(val_prec)
-            test_loss, test_prec = test_with_select(test_loader, override=cam, result_type=result_type)
-            test_losses.append(test_loss)
-            test_precs.append(test_prec)
-        diag_copy = lambda x: np.max(np.stack([np.swapaxes(x, 0, 1), x]), axis=0)
-        val_losses, val_precs = np.array(val_losses), np.array(val_precs)
-        test_losses, test_precs = np.array(test_losses), np.array(test_precs)
-        val_losses, val_precs = diag_copy(val_losses), diag_copy(val_precs)
-        test_losses, test_precs = diag_copy(test_losses), diag_copy(test_precs)
-        test_precs_avg = test_precs[~np.eye(train_set.num_cam, dtype=bool)].mean(axis=0)
-        loss_strategy = np.argmin(val_losses, axis=0)
-        loss_strategy_precs = test_precs[loss_strategy, np.arange(train_set.num_cam)]
+    def log_best2cam_strategy(result_type=('prec',)):
+        val_loss_s, val_oracle_s, val_prec_s = test_override(val_loader, result_type=result_type)
+        test_loss_s, test_oracle_s, test_prec_s = test_override(test_loader, result_type=result_type)
+        val_loss_s, val_prec_s = np.array(val_loss_s), np.array(val_prec_s)
+        test_loss_s, test_prec_s = np.array(test_loss_s), np.array(test_prec_s)
+        test_precs_avg = test_prec_s[~np.eye(train_set.num_cam, dtype=bool)].mean(axis=0)
+        loss_strategy = np.argmin(val_loss_s, axis=0)
+        loss_strategy_precs = test_prec_s[loss_strategy, np.arange(train_set.num_cam)]
         loss2cam = np.mean(loss_strategy_precs, axis=0)
-        result_strategy = np.argmax(val_precs[:, :, 0], axis=0)
-        result_strategy_precs = test_precs[result_strategy, np.arange(train_set.num_cam)]
+        result_strategy = np.argmax(val_prec_s[:, :, 0], axis=0)
+        result_strategy_precs = test_prec_s[result_strategy, np.arange(train_set.num_cam)]
         result2cam = np.mean(result_strategy_precs, axis=0)
-        theory_strategy = np.argmax(test_precs[:, :, 0], axis=0)
-        theory_strategy_precs = test_precs[theory_strategy, np.arange(train_set.num_cam)]
+        theory_strategy = np.argmax(test_prec_s[:, :, 0], axis=0)
+        theory_strategy_precs = test_prec_s[theory_strategy, np.arange(train_set.num_cam)]
         best2cam = np.mean(theory_strategy_precs, axis=0)
         _, prec = trainer.test(test_loader)
-        np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_losses, test_losses]), '%.2f')
+        np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_loss_s, test_loss_s]), '%.2f')
         for i in range(len(result_type)):
             fname = f'{result_type[i]}_{prec[i]:.1f}_Lstrategy{loss2cam[i]:.1f}_Rstrategy{result2cam[i]:.1f}_' \
                     f'theory{best2cam[i]:.1f}_avg{test_precs_avg[i]:.1f}.txt'
             np.savetxt(f'{logdir}/{fname}',
-                       np.concatenate([val_precs[:, :, i], test_precs[:, :, i]]), '%.1f',
+                       np.concatenate([val_prec_s[:, :, i], test_prec_s[:, :, i]]), '%.1f',
                        header=f'loading checkpoint...\n'
                               f'{logdir}\n'
                               f'val / test',
@@ -280,7 +283,8 @@ def main(args):
                               f'theory {best2cam[i]:.1f}, average {test_precs_avg[i]:.1f}\n'
                               f'all cam: {prec[i]:.1f}')
             with open(f'{logdir}/{fname}', 'r') as fp:
-                print(fp.read())
+                if i == 0:
+                    print(fp.read())
             if args.resume is None and not args.random_select and i == 0:
                 shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
@@ -293,7 +297,7 @@ def main(args):
 
 
 if __name__ == '__main__':
-    # settings
+    # common settings
     parser = argparse.ArgumentParser(description='view selection for multiview classification & detection')
     parser.add_argument('--eval', action='store_true', help='evaluation only')
     parser.add_argument('--arch', type=str, default='resnet18')
@@ -313,16 +317,16 @@ if __name__ == '__main__':
     parser.add_argument('--visualize', action='store_true')
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
-
-    parser.add_argument('--eval_init_cam', type=str2bool, default=False)
-
+    # MVSelect settings
     parser.add_argument('--select', type=str2bool, default=False)
     parser.add_argument('--random_select', action='store_true')
     parser.add_argument('--gumbel', type=str2bool, default=True)
     parser.add_argument('--hard', type=str2bool, default=True)
     parser.add_argument('--beta_conf', type=float, default=0.0)
     parser.add_argument('--beta_even', type=float, default=0.0)
-
+    # multiview detection specific settings
+    parser.add_argument('--eval_init_cam', type=str2bool, default=False,
+                        help='only consider pedestrians covered by the initial camera')
     parser.add_argument('--reID', action='store_true')
     parser.add_argument('--augmentation', type=str2bool, default=True)
     parser.add_argument('--id_ratio', type=float, default=0)
@@ -336,7 +340,7 @@ if __name__ == '__main__':
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_reduce', type=int, default=12)
     parser.add_argument('--img_kernel_size', type=int, default=10)
-    parser.add_argument('--beta_coverage', type=float, default=0.05)
+    parser.add_argument('--beta_coverage', type=float, default=0.0)
 
     args = parser.parse_args()
 

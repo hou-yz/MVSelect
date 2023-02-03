@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
 from src.loss import *
-from src.evaluation.evaluate import evaluate
+from src.evaluation.evaluate import evaluate, evaluateDetection_py
 from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
@@ -41,7 +41,7 @@ class PerspectiveTrainer(object):
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             for key in imgs_gt.keys():
-                imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
+                imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             if self.args.select:
                 init_prob = np.concatenate([np.random.choice(
                     keep_cams[b].nonzero().squeeze(), 1, replace=False) for b in range(B)])
@@ -70,16 +70,16 @@ class PerspectiveTrainer(object):
             if self.args.select:
                 # reg_coverage
                 Rworld_coverage = dataloader.dataset.Rworld_coverage.cuda()
-                if self.args.eval_init_cam:
-                    loss = self.focal_loss(world_heatmap, world_gt['heatmap'], init_prob @ Rworld_coverage)
-                else:
-                    H, W = dataloader.dataset.Rworld_shape
-                    coverages = ((softmax_to_hard(select_prob) @
-                                  Rworld_coverage.view(N, -1).float()).view(-1, 1, H, W) +
-                                 init_prob @ Rworld_coverage.view(N, -1).float().view(-1, 1, H, W)).clamp(0, 1)
-                    loss = (self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) +
-                            self.args.beta_coverage * (1 - coverages).mean())
-                    # if self.args.beta_coverage else loss_w_hm
+                # if self.args.eval_init_cam:
+                #     loss = self.focal_loss(world_heatmap, world_gt['heatmap'], init_prob @ Rworld_coverage)
+                # else:
+                #     H, W = dataloader.dataset.Rworld_shape
+                #     coverages = ((softmax_to_hard(select_prob) @
+                #                   Rworld_coverage.view(N, -1).float()).view(-1, 1, H, W) +
+                #                  init_prob @ Rworld_coverage.view(N, -1).float().view(-1, 1, H, W)).clamp(0, 1)
+                #     loss = (self.focal_loss(world_heatmap, world_gt['heatmap'], coverages.detach()) +
+                #             self.args.beta_coverage * (1 - coverages).mean()) if self.args.beta_coverage else loss_w_hm
+                loss = loss_w_hm
                 # reg_conf
                 reg_conf = (1 - F.softmax(cam_emb, dim=1).max(dim=1)[0]).mean()
                 # reg_even
@@ -132,22 +132,18 @@ class PerspectiveTrainer(object):
             del reg_conf, reg_even
         return losses / len(dataloader), None
 
-    def test(self, dataloader, init_cam=None, override=None):
-        # return 0, [0, 1, 2, 3, ]
+    def test(self, dataloader, init_cam=None):
         t0 = time.time()
         self.model.eval()
         losses = 0
         res_list = []
         selected_cams = []
-        for batch_idx, (data, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
+        for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
-            data = data.cuda()
-            for key in imgs_gt.keys():
-                imgs_gt[key] = imgs_gt[key].view([B * N] + list(imgs_gt[key].shape)[2:])
             # with autocast():
             with torch.no_grad():
                 (world_heatmap, world_offset), _, (cam_emb, cam_pred, select_prob) = \
-                    self.model(data, affine_mats, init_cam, override=override)
+                    self.model(imgs.cuda(), affine_mats, init_cam)
             loss = self.focal_loss(world_heatmap, world_gt['heatmap'])
             if self.args.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
@@ -178,11 +174,66 @@ class PerspectiveTrainer(object):
 
         res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
         np.savetxt(f'{self.logdir}/test.txt', res_list, '%d')
-        gt_fname = f'gt_{init_cam}.txt' if self.args.eval_init_cam and init_cam is not None else 'gt.txt'
-        recall, precision, moda, modp = evaluate(os.path.abspath(f'{self.logdir}/test.txt'),
-                                                 os.path.abspath(f'{dataloader.dataset.root}/{gt_fname}'),
-                                                 dataloader.dataset.base.__name__)
+        gt_fname = f'{dataloader.dataset.gt_fname}_{init_cam}.txt' \
+            if self.args.eval_init_cam and init_cam is not None else f'{dataloader.dataset.gt_fname}.txt'
+        moda, modp, precision, recall = evaluate(f'{self.logdir}/test.txt',
+                                                 gt_fname,
+                                                 dataloader.dataset.base.__name__,
+                                                 dataloader.dataset.frames)
         print(f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '
               f'\t loss: {losses / len(dataloader):.6f}, time: {time.time() - t0:.1f}s')
 
         return losses / len(dataloader), [moda, modp, precision, recall, ]
+
+    def test_cam_combination(self, dataloader, init_cam):
+        self.model.eval()
+        loss_s, result_s = [[] for _ in range(self.model.num_cam)], [[] for _ in range(self.model.num_cam)]
+        metric_s, stats_s = [], []
+        for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
+            B, N = imgs.shape[:2]
+            with torch.no_grad():
+                (world_heatmap, world_offset), _, _ = \
+                    self.model.forward_override_combination(imgs.cuda(), affine_mats, init_cam)
+
+            if self.args.eval_init_cam:
+                world_heatmap *= dataloader.dataset.Rworld_coverage[init_cam].cuda()
+            # decode
+            xys = mvdet_decode(torch.sigmoid(world_heatmap.flatten(0, 1)), world_offset.flatten(0, 1),
+                               reduce=dataloader.dataset.world_reduce).cpu()
+            grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
+            if dataloader.dataset.base.indexing == 'xy':
+                positions = grid_xy
+            else:
+                positions = grid_xy[:, :, [1, 0]]
+            positions, scores = positions.unflatten(0, [B, N]), scores.unflatten(0, [B, N])
+            for b in range(B):
+                for cam in range(self.model.num_cam):
+                    ids = scores[b, cam].squeeze() > self.args.cls_thres
+                    pos, s = positions[b, cam, ids], scores[b, cam, ids, 0]
+                    ids, count = nms(pos, s, 20, np.inf)
+                    res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
+                    result_s[cam].append(res)
+
+                    loss = self.focal_loss(world_heatmap[[b], cam], world_gt['heatmap'][[b]])
+                    loss_s[cam].append(loss.cpu().item())
+        result_s = [torch.cat(result_s[cam], 0) for cam in range(self.model.num_cam)]
+        loss_s = np.array(loss_s)
+        # eval
+        gt_fname = f'{dataloader.dataset.gt_fname}_{init_cam}.txt' \
+            if self.args.eval_init_cam and init_cam is not None else f'{dataloader.dataset.gt_fname}.txt'
+        for cam in range(self.model.num_cam):
+            moda, modp, prec, recall, stats = evaluateDetection_py(result_s[cam], gt_fname,
+                                                                   frames=dataloader.dataset.frames)
+            metric_s.append([moda, modp, prec, recall])
+            stats_s.append(stats)
+        metric_s = np.array(metric_s)
+        tp_per_frame = np.array([stats_s[cam][0] for cam in range(self.model.num_cam)])
+        oracle_result_strategy = np.argmax(tp_per_frame, axis=0)
+        oracle_loss_strategy = np.argmin(loss_s, axis=0)
+        oracle_result = []
+        for frame_idx, frame in enumerate(dataloader.dataset.frames):
+            cam = oracle_result_strategy[frame_idx]
+            oracle_result.append(result_s[cam][result_s[cam][:, 0] == frame])
+        oracle_result = np.concatenate(oracle_result)
+        moda, modp, prec, recall, _ = evaluateDetection_py(oracle_result, gt_fname, frames=dataloader.dataset.frames)
+        return loss_s.mean(1), [moda, modp, prec, recall], metric_s
