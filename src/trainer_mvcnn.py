@@ -33,14 +33,33 @@ class ClassifierTrainer(object):
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
+            reg_conf, reg_even = None, None
+            feat, _ = self.model.get_feat(imgs, None)
             if self.args.select:
-                init_prob = np.concatenate([np.random.choice(
-                    keep_cams[b].nonzero().squeeze(), 1, replace=False) for b in range(B)])
-                init_prob = F.one_hot(torch.tensor(init_prob), num_classes=N).cuda()
+                init_prob = []
+                overall_feat = []
+                cam_emb, cam_pred, select_prob = [], [], []
+                output = []
+                for cam in range(N):
+                    init_prob_i = F.one_hot(torch.tensor(cam).repeat(B), num_classes=N).cuda()
+                    overall_feat_i, (cam_emb_i, cam_pred_i, select_prob_i) = \
+                        self.model.cam_pred(feat, init_prob_i, keep_cams, hard)
+                    output_i = self.model.get_output(overall_feat_i)
+                    init_prob.append(init_prob_i)
+                    overall_feat.append(overall_feat_i)
+                    cam_emb.append(cam_emb_i)
+                    cam_pred.append(cam_pred_i)
+                    select_prob.append(select_prob_i)
+                    output.append(output_i)
+                cam_emb, cam_pred = torch.stack(cam_emb, 1).flatten(0, 1), torch.stack(cam_pred, 1).flatten(0, 1)
+                init_prob, select_prob = torch.stack(init_prob, 1).flatten(0, 1), \
+                    torch.stack(select_prob, 1).flatten(0, 1)
+                output = torch.stack(output, 1).flatten(0, 1)
+                tgt = tgt.repeat_interleave(N, 0)
             else:
                 init_prob = None
-            reg_conf, reg_even = None, None
-            output, _, (cam_emb, cam_pred, select_prob) = self.model(imgs, None, init_prob, keep_cams, hard)
+                overall_feat, (cam_emb, cam_pred, select_prob) = self.model.cam_pred(feat, init_prob, keep_cams, hard)
+                output = self.model.get_output(overall_feat)
             loss = self.ce_loss(output, tgt)
 
             pred = torch.argmax(output, 1)

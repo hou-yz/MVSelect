@@ -190,28 +190,31 @@ def main(args):
                 loss_s.append(loss)
                 prec_s.append(prec)
             loss, prec = np.average(loss_s), np.average(np.array(prec_s), axis=0)
+            result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, prec))
+            print('*************************************')
+            print(f'MVSelect average {result_str}, time: {time.time() - t0:.1f}')
+            print('*************************************')
         else:
             print(f'using all cameras:')
             loss, prec = trainer.test(dataloader)
-        result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, prec))
-        print(f'average {result_str}\t loss: {loss:.6f}, time: {time.time() - t0:.1f}')
         return loss, prec
 
     def test_override(dataloader, result_type=('prec',)):
         loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s = [], [], []
+        t0 = time.time()
         for init_cam in range(train_set.num_cam):
-            t0 = time.time()
+            t1 = time.time()
             print(f'init camera {init_cam}: override')
             loss, instance_lvl_max_prec, dataset_lvl_prec = trainer.test_cam_combination(dataloader, init_cam)
             loss_s.append(loss)
             instance_lvl_max_prec_s.append(instance_lvl_max_prec)
             dataset_lvl_prec_s.append(dataset_lvl_prec)
             result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec))
-            print(f'oracle {result_str} \t time: {time.time() - t0:.1f}s')
+            print(f'oracle {result_str} \t time: {time.time() - t1:.1f}s')
         instance_lvl_max_prec_s = np.array(instance_lvl_max_prec_s)
         result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec_s.mean(0)))
         print('*************************************')
-        print(f'oracle average {result_str}')
+        print(f'oracle average {result_str}, time: {time.time() - t0:.1f}')
         print('*************************************')
         return loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s
 
@@ -267,20 +270,24 @@ def main(args):
                        header=f'loading checkpoint...\n'
                               f'{logdir}\n'
                               f'val / test',
-                       footer=f'\tloss strategy\n' +
+                       footer=f'\tdataset level: loss strategy\n' +
                               ' '.join(f'cam {loss_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
                               ' '.join(f'{loss_strategy_precs[cam, i]:.1f}% |'
                                        for cam in range(train_set.num_cam)) + '\n' +
-                              f'\tresult strategy\n' +
+                              f'\tdataset level: result strategy\n' +
                               ' '.join(f'cam {result_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
                               ' '.join(f'{result_strategy_precs[cam, i]:.1f}% |'
                                        for cam in range(train_set.num_cam)) + '\n' +
-                              f'\ttheory\n' +
+                              f'\tdataset level: theory\n' +
                               ' '.join(f'cam {theory_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
                               ' '.join(f'{theory_strategy_precs[cam, i]:.1f}% |'
                                        for cam in range(train_set.num_cam)) + '\n' +
+                              f'\tinstance level: oracle\n' +
+                              ' '.join(f'----- |' for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'{test_oracle_s[cam, i]:.1f}% |'
+                                       for cam in range(train_set.num_cam)) + '\n' +
                               f'2 best cam: loss_strategy {loss2cam[i]:.1f}, result_strategy {result2cam[i]:.1f}, '
-                              f'theory {best2cam[i]:.1f}, average {test_precs_avg[i]:.1f}\n'
+                              f'theory {best2cam[i]:.1f}, oracle {test_oracle_s.mean(0)[i]:.1f}, average {test_precs_avg[i]:.1f}\n'
                               f'all cam: {prec[i]:.1f}')
             with open(f'{logdir}/{fname}', 'r') as fp:
                 if i == 0:
@@ -290,7 +297,7 @@ def main(args):
 
     print('Test loaded model...')
     print(logdir)
-    if not args.select and not args.eval:
+    if not args.select:
         log_best2cam_strategy(result_type)
     else:
         trainer.test(test_loader)
