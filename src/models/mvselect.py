@@ -50,22 +50,20 @@ def aggregate_init_selection(init_feat, init_prob, feat, select_prob, aggregatio
 class CamPredModule(nn.Module):
     def __init__(self, num_cam, hidden_dim, kernel_size=1, gumbel=True, random_select=False, aggregation='max'):
         super().__init__()
-        self.cam_feat = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-                                      nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
+        # self.cam_feat = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        #                               nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
         self.kernel_size = kernel_size
-        # if kernel_size == 1:
-        #     stride, padding = 1, 0
-        # elif kernel_size == 3:
-        #     stride, padding = 2, 1
-        # else:
-        #     raise Exception
-        # self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(),
-        #                               nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(), )
-        # self.cam_feat[-2].weight.data.fill_(0)
-        # self.cam_feat[-2].bias.data.fill_(0)
+        if kernel_size == 1:
+            stride, padding = 1, 0
+        elif kernel_size == 3:
+            stride, padding = 2, 1
+        else:
+            raise Exception
+        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(),
+                                      nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(), )
+        self.cam_feat[-2].weight.data.fill_(0)
+        self.cam_feat[-2].bias.data.fill_(0)
         # self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
-        # self.cam_emb = nn.Embedding(num_cam, num_cam)
-        # self.cam_emb.weight.data.fill_(0)
         self.cam_emb = nn.Parameter(torch.zeros([num_cam, num_cam]))
         self.cam_pred = nn.Linear(hidden_dim, num_cam, bias=False)
         self.cam_pred.weight.data.fill_(0)
@@ -94,12 +92,12 @@ class CamPredModule(nn.Module):
         init_feat = aggregate_init(feat, init_prob, self.aggregation)
 
         if not self.random_select:
-            cam_emb = F.layer_norm(init_prob.float() @ self.cam_emb, [N])
+            cam_emb = init_prob.float() @ self.cam_emb
             # cam_emb = F.layer_norm(self.cam_emb(init_prob.nonzero()[:, 1]), [N])
             # cam_feat = self.cam_feat(init_feat[:, :, None, None] if len(init_feat.shape) == 2 else init_feat)
-            cam_feat = self.cam_feat(init_feat.amax(dim=[2, 3]))
-            cam_pred = F.layer_norm(self.cam_pred(cam_feat), [N]) / 10
-            logits = cam_pred + cam_emb
+            cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3])
+            cam_pred = self.cam_pred(cam_feat)
+            logits = cam_emb + cam_pred
         else:
             logits = cam_pred = cam_emb = torch.randn([B, N], device=feat.device)
         if self.training:
