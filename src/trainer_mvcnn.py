@@ -34,7 +34,7 @@ class ClassifierTrainer(object):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
             reg_conf, reg_even = None, None
-            feat, _ = self.model.get_feat(imgs, None)
+            feat, _ = self.model.get_feat(imgs, None, self.args.down)
             if self.args.select:
                 init_prob = []
                 overall_feat = []
@@ -130,7 +130,7 @@ class ClassifierTrainer(object):
             imgs, tgt = imgs.cuda(), tgt.cuda()
             # with autocast():
             with torch.no_grad():
-                output, _, (cam_emb, cam_pred, select_prob) = self.model(imgs, None, init_cam)
+                output, _, (cam_emb, cam_pred, select_prob) = self.model(imgs, None, self.args.down, init_cam)
             loss = self.ce_loss(output, tgt)
             if init_cam is not None:
                 selected_cams.extend(select_prob.argmax(dim=1).detach().cpu().numpy().tolist())
@@ -158,7 +158,7 @@ class ClassifierTrainer(object):
             B, N = imgs.shape[:2]
             tgt = tgt.unsqueeze(1).repeat([1, N])
             with torch.no_grad():
-                output, _, _ = self.model.forward_override_combination(imgs.cuda(), None, init_cam)
+                output, _, _ = self.model.forward_override_combination(imgs.cuda(), None, self.args.down, init_cam)
             loss = F.cross_entropy(output.flatten(0, 1), tgt.flatten(0, 1).cuda(), reduction="none")
             pred = torch.argmax(output, -1)
             loss_s.append(loss.cpu().unflatten(0, [B, N]))

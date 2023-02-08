@@ -102,8 +102,7 @@ class frameDataset(VisionDataset):
 
         self.world_from_img, self.img_from_world = self.get_world_imgs_trans()
         world_masks = torch.ones([self.num_cam, 1] + self.worldgrid_shape)
-        self.imgs_region = warp_perspective(world_masks, self.img_from_world, self.img_shape, 'nearest',
-                                            align_corners=False)
+        self.imgs_region = warp_perspective(world_masks, self.img_from_world, self.img_shape, 'nearest')
         self.Rworld_coverage = self.get_world_coverage().bool()
 
         self.img_fpaths = self.get_image_fpaths(frame_range)
@@ -185,7 +184,7 @@ class frameDataset(VisionDataset):
                                  for cam in range(self.num_cam)]).float()
 
         imgs = torch.ones([self.num_cam, 1, self.base.img_shape[0], self.base.img_shape[1]])
-        coverage = warp_perspective(imgs, proj_mats, self.Rworld_shape, align_corners=False)
+        coverage = warp_perspective(imgs, proj_mats, self.Rworld_shape)
         return coverage
 
     def get_world_imgs_trans(self, z=0):

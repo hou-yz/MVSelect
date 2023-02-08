@@ -35,7 +35,7 @@ class MVDet(MultiviewBase):
                  use_bottleneck=True, hidden_dim=128, outfeat_dim=0, z=0,
                  gumbel=False, random_select=False):
         super().__init__(dataset, aggregation)
-        self.Rimg_shape, self.Rworld_shape = dataset.Rimg_shape, dataset.Rworld_shape
+        self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
         self.img_reduce = dataset.img_reduce
 
         # world grid change to xy indexing
@@ -52,7 +52,7 @@ class MVDet(MultiviewBase):
         # Rworldgrid(xy)_from_imgcoord(xy)
         self.proj_mats = torch.stack([torch.from_numpy(Rworldgrid_from_worldcoord_mat @
                                                        worldcoord_from_imgcoord_mats[cam])
-                                      for cam in range(dataset.num_cam)])
+                                      for cam in range(dataset.num_cam)]).float()
 
         if arch == 'resnet18':
             self.base = nn.Sequential(*list(resnet18(pretrained=True,
@@ -99,25 +99,27 @@ class MVDet(MultiviewBase):
         fill_fc_weights(self.world_offset)
         pass
 
-    def get_feat(self, imgs, M, visualize=False):
+    def get_feat(self, imgs, M, down=1, visualize=False):
         B, N, _, H, W = imgs.shape
-        imgs = imgs.flatten(0, 1)
+        imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / down)
 
         inverse_affine_mats = torch.inverse(M.view([B * N, 3, 3]))
         # image and world feature maps from xy indexing, change them into world indexing / xy indexing (img)
         imgcoord_from_Rimggrid_mat = inverse_affine_mats @ \
-                                     torch.from_numpy(np.diag([self.img_reduce, self.img_reduce, 1])
-                                                      ).view(1, 3, 3).repeat(B * N, 1, 1).float()
+                                     torch.diag(torch.tensor([self.img_reduce * down, self.img_reduce * down, 1])
+                                                ).unsqueeze(0).repeat(B * N, 1, 1).float()
         # Rworldgrid(xy)_from_Rimggrid(xy)
-        proj_mats = self.proj_mats.repeat(B, 1, 1, 1).view(B * N, 3, 3).float() @ imgcoord_from_Rimggrid_mat
+        # proj_mats = torch.diag(torch.tensor([1 / down, 1 / down, 1])).unsqueeze(0).repeat(B * N, 1, 1).float() @ \
+        #             self.proj_mats.unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
+        proj_mats = self.proj_mats.unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
 
         if visualize:
             denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-            proj_imgs = warp_perspective(T.Resize(self.Rimg_shape)(imgs), proj_mats.to(imgs.device),
-                                         self.Rworld_shape, align_corners=False).unflatten(0, [B, N])
+            proj_imgs = warp_perspective(F.interpolate(imgs, scale_factor=1 / 8), proj_mats.to(imgs.device),
+                                         (self.Rworld_shape / down).astype(int)).unflatten(0, [B, N])
             for cam in range(N):
                 visualize_img = T.ToPILImage()(denorm(imgs.detach())[cam * B])
-                visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
+                # visualize_img.save(f'../../imgs/augimg{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
                 visualize_img = T.ToPILImage()(denorm(proj_imgs.detach())[0, cam])
@@ -135,24 +137,24 @@ class MVDet(MultiviewBase):
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(imgs_feat[cam * B].detach(), dim=0).cpu())
-                visualize_img.save(f'../../imgs/augimgfeat{cam + 1}.png')
+                # visualize_img.save(f'../../imgs/augimgfeat{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
 
         # world feat
-        H, W = self.Rworld_shape
-        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), (H, W),
-                                      align_corners=False).unflatten(0, [B, N])
+        world_feat = warp_perspective(imgs_feat, proj_mats.to(imgs.device), self.Rworld_shape).unflatten(0, [B, N])
 
         if visualize:
             for cam in range(N):
                 visualize_img = array2heatmap(torch.norm(world_feat[0, cam].detach(), dim=0).cpu())
-                visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
+                # visualize_img.save(f'../../imgs/projfeat{cam + 1}.png')
                 plt.imshow(visualize_img)
                 plt.show()
 
         # world_feat = self.world_feat_pre(world_feat) * keep_cams.view(B * N, 1, 1, 1).to(imgs.device)
-        return world_feat, (imgs_heatmap, imgs_offset, imgs_wh)
+        return world_feat, (F.interpolate(imgs_heatmap, tuple(self.Rimg_shape)),
+                            F.interpolate(imgs_offset, tuple(self.Rimg_shape)),
+                            F.interpolate(imgs_wh, tuple(self.Rimg_shape)))
 
     def get_output(self, world_feat, visualize=False):
 
@@ -164,11 +166,11 @@ class MVDet(MultiviewBase):
 
         if visualize:
             visualize_img = array2heatmap(torch.norm(world_feat[0].detach(), dim=0).cpu())
-            visualize_img.save(f'../../imgs/worldfeatall.png')
+            # visualize_img.save(f'../../imgs/worldfeatall.png')
             plt.imshow(visualize_img)
             plt.show()
             visualize_img = array2heatmap(torch.sigmoid(world_heatmap.detach())[0, 0].cpu())
-            visualize_img.save(f'../../imgs/worldres.png')
+            # visualize_img.save(f'../../imgs/worldres.png')
             plt.imshow(visualize_img)
             plt.show()
 
@@ -184,22 +186,24 @@ def test():
     from src.utils.decode import ctdet_decode
     from thop import profile
 
-    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train')
+    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', augmentation=True)
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     keep_cams[0, 3] = 0
     init_cam = 0
-    # model.train()
-    # (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, init_cam, keep_cams)
+    model.load_state_dict(torch.load(
+        '/home/houyz/Code/MVselect/logs/wildtrack/resnet18_max_lr0.0005_b2_e10_dropcam0.0_2023-02-05_23-06-40/model.pth'))
+    model.train()
+    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, 2)
     # xysc_train = ctdet_decode(world_heatmap, world_offset)
     # model.eval()
-    # (world_heatmap, world_offset), _, cam_eval = model(imgs.cuda(), affine_mats, init_cam, keep_cams, override=3)
+    # (world_heatmap, world_offset), _, cam_eval = model(imgs.cuda(), affine_mats, 2, init_cam, keep_cams, override=3)
     # xysc_eval = ctdet_decode(world_heatmap, world_offset)
-    init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
-    with torch.no_grad():
-        cam_combination_results = model.forward_override_combination(imgs.cuda(), affine_mats, init_prob)
+    # init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
+    # with torch.no_grad():
+    #     cam_combination_results = model.forward_override_combination(imgs.cuda(), affine_mats, 2, init_prob)
     # macs, params = profile(model, inputs=(imgs[:, :2], affine_mats))
     # macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))
     #

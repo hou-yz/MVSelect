@@ -12,13 +12,13 @@ class MultiviewBase(nn.Module):
         self.aggregation = aggregation
         self.cam_pred = None
 
-    def forward(self, imgs, M=None, init_prob=None, keep_cams=None, hard=None, visualize=False):
-        feat, aux_res = self.get_feat(imgs, M, visualize)
+    def forward(self, imgs, M=None, down=1, init_prob=None, keep_cams=None, hard=None, visualize=False):
+        feat, aux_res = self.get_feat(imgs, M, down, visualize)
         overall_feat, selection_res = self.cam_pred(feat, init_prob, keep_cams, hard)
         overall_res = self.get_output(overall_feat, visualize)
         return overall_res, aux_res, selection_res
 
-    def get_feat(self, imgs, M, visualize=False):
+    def get_feat(self, imgs, M, down=1, visualize=False):
         feat, aux_res = None, None
         return feat, aux_res
 
@@ -26,7 +26,7 @@ class MultiviewBase(nn.Module):
         overall_result = None
         return overall_result
 
-    def forward_override_combination(self, imgs, M, init_prob):
+    def forward_override_combination(self, imgs, M, down, init_prob):
         B, N, C, H, W = imgs.shape
         if isinstance(init_prob, int):
             init_prob = F.one_hot(torch.tensor(init_prob).repeat(B), num_classes=N)
@@ -34,7 +34,7 @@ class MultiviewBase(nn.Module):
             init_prob = F.one_hot(torch.tensor(init_prob), num_classes=N)
         init_prob = init_prob.bool().to(imgs.device)
 
-        feat, aux_res = self.get_feat(imgs, M)
+        feat, aux_res = self.get_feat(imgs, M, down)
         init_feat = aggregate_init(feat, init_prob, self.aggregation)
         overall_feat_s, selection_prob_s = [], []
         for cam in range(self.num_cam):

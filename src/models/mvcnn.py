@@ -10,7 +10,6 @@ from src.models.multiview_base import MultiviewBase
 from src.models.mvselect import CamPredModule
 
 
-
 class MVCNN(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max', gumbel=True, random_select=False):
         super().__init__(dataset, aggregation, )
@@ -33,9 +32,10 @@ class MVCNN(MultiviewBase):
         self.cam_pred = CamPredModule(dataset.num_cam, base_dim, 1, gumbel, random_select)
         pass
 
-    def get_feat(self, imgs, M, visualize=False):
-        B, N, C, H, W = imgs.shape
-        imgs_feat = self.base(imgs.flatten(0, 1))
+    def get_feat(self, imgs, M, down=1, visualize=False):
+        B, N, _, H, W = imgs.shape
+        imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / down)
+        imgs_feat = self.base(imgs)
         imgs_feat = self.avgpool(imgs_feat)
         _, C, H, W = imgs_feat.shape
         return imgs_feat.unflatten(0, [B, N]), None
@@ -56,12 +56,12 @@ if __name__ == '__main__':
     model = MVCNN(dataset).cuda()
     init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
     keep_cams[0, 3] = 0
-    # model.train()
-    # res = model(imgs.cuda(), None, init_prob, keep_cams)
+    model.train()
+    res = model(imgs.cuda(), None, 2, init_prob, keep_cams)
     # model.eval()
     # res = model(imgs.cuda(), None, init_prob, override=5)
-    with torch.no_grad():
-        cam_combination_results = model.forward_override_combination(imgs.cuda(), None, 1)
+    # with torch.no_grad():
+    #     cam_combination_results = model.forward_override_combination(imgs.cuda(), None, 1)
     # macs, params = profile(model, inputs=(imgs[:, ],))
     #
     # print(f'{macs}')

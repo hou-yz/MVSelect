@@ -114,7 +114,7 @@ def main(args):
                           f'cover{args.beta_coverage}_' if not args.random_select else 'random_select_'
         lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
                       f'select{args.select_lr_ratio}' if args.select and not args.random_select else ''
-        logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_' \
+        logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
                  f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
                  f'{select_settings if args.select else ""}' \
                  f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
@@ -297,10 +297,11 @@ def main(args):
 
     print('Test loaded model...')
     print(logdir)
-    if not args.select:
-        log_best2cam_strategy(result_type)
-    else:
-        trainer.test(test_loader)
+    # if not args.select:
+    #     log_best2cam_strategy(result_type)
+    # else:
+    #     trainer.test(test_loader)
+    trainer.test(test_loader)
 
 
 if __name__ == '__main__':
@@ -325,6 +326,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVSelect settings
+    parser.add_argument('--down', type=int, default=1, help='down sample the image to 1/N size')
     parser.add_argument('--select', type=str2bool, default=False)
     parser.add_argument('--random_select', action='store_true')
     parser.add_argument('--gumbel', type=str2bool, default=True)

@@ -43,7 +43,7 @@ class PerspectiveTrainer(object):
             for key in imgs_gt.keys():
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             reg_conf, reg_even = None, None
-            feat, (imgs_heatmap, imgs_offset, imgs_wh) = self.model.get_feat(imgs.cuda(), affine_mats)
+            feat, (imgs_heatmap, imgs_offset, imgs_wh) = self.model.get_feat(imgs.cuda(), affine_mats, self.args.down)
             if self.args.select:
                 init_prob = []
                 overall_feat = []
@@ -163,7 +163,7 @@ class PerspectiveTrainer(object):
             # with autocast():
             with torch.no_grad():
                 (world_heatmap, world_offset), _, (cam_emb, cam_pred, select_prob) = \
-                    self.model(imgs.cuda(), affine_mats, init_cam)
+                    self.model(imgs.cuda(), affine_mats, self.args.down, init_cam)
             loss = self.focal_loss(world_heatmap, world_gt['heatmap'])
             if self.args.use_mse:
                 loss = self.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
@@ -213,7 +213,7 @@ class PerspectiveTrainer(object):
             B, N = imgs.shape[:2]
             with torch.no_grad():
                 (world_heatmap, world_offset), _, _ = \
-                    self.model.forward_override_combination(imgs.cuda(), affine_mats, init_cam)
+                    self.model.forward_override_combination(imgs.cuda(), affine_mats, self.args.down, init_cam)
 
             if self.args.eval_init_cam:
                 world_heatmap *= dataloader.dataset.Rworld_coverage[init_cam].cuda()
