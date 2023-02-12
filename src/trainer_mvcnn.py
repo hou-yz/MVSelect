@@ -17,76 +17,87 @@ class ClassifierTrainer(object):
         super(ClassifierTrainer, self).__init__()
         self.model = model
         self.args = args
-        self.ce_loss = nn.CrossEntropyLoss()
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, hard=None, log_interval=1000):
+    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=200):
         self.model.train()
         if self.args.base_lr_ratio == 0:
             self.model.base.eval()
         losses, correct, miss = 0, 0, 1e-8
         t0 = time.time()
-        select_prob_sum = torch.zeros([self.model.num_cam]).cuda()
-        # cam_pred_ema = torch.zeros([self.model.num_cam]).cuda()
-        cam_pred_ema = torch.zeros([self.model.num_cam, self.model.num_cam]).cuda()
+        action_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
+        return_avg = None
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
-            reg_conf, reg_even = None, None
             feat, _ = self.model.get_feat(imgs, None, self.args.down)
-            if self.args.select:
-                init_prob = []
-                overall_feat = []
-                cam_emb, cam_pred, select_prob = [], [], []
-                output = []
+            if self.args.steps:
+                loss = []
+                # consider all cameras as initial one
                 for cam in range(N):
-                    init_prob_i = F.one_hot(torch.tensor(cam).repeat(B), num_classes=N).cuda()
-                    overall_feat_i, (cam_emb_i, cam_pred_i, select_prob_i) = \
-                        self.model.cam_pred(feat, init_prob_i, keep_cams, hard)
-                    output_i = self.model.get_output(overall_feat_i)
-                    init_prob.append(init_prob_i)
-                    overall_feat.append(overall_feat_i)
-                    cam_emb.append(cam_emb_i)
-                    cam_pred.append(cam_pred_i)
-                    select_prob.append(select_prob_i)
-                    output.append(output_i)
-                cam_emb, cam_pred = torch.stack(cam_emb, 1).flatten(0, 1), torch.stack(cam_pred, 1).flatten(0, 1)
-                init_prob, select_prob = torch.stack(init_prob, 1).flatten(0, 1), \
-                    torch.stack(select_prob, 1).flatten(0, 1)
-                output = torch.stack(output, 1).flatten(0, 1)
-                tgt = tgt.repeat_interleave(N, 0)
+                    # if True:
+                    log_probs, values, actions, rewards, task_loss = [], [], [], [], []
+                    # get result from using initial camera feature
+                    init_prob = F.one_hot(torch.tensor(cam).repeat(B), num_classes=N).cuda()
+                    # init_prob = F.one_hot(torch.randint(N, [B]), num_classes=N).cuda()
+                    # with torch.no_grad():
+                    #     output_i = self.model.get_output((feat * init_prob[:, :, None, None, None]).sum(1))
+                    # task_loss_last = F.cross_entropy(output_i, tgt, reduction='none')
+
+                    # rollout episode
+                    for i in range(self.args.steps):
+                        overall_feat_i, (log_prob_i, value_i, action_i) = self.model.select_module(feat, init_prob,
+                                                                                                   keep_cams)
+                        output_i = self.model.get_output(overall_feat_i)
+                        task_loss_i = F.cross_entropy(output_i, tgt, reduction='none')
+                        # decrease in task loss means higher performance, hence positive reward
+                        # reward_i = (task_loss_last - task_loss_i).detach()
+                        # task_loss_last = task_loss_i.detach()
+                        reward_i = torch.zeros_like(task_loss_i) if i < self.args.steps - 1 \
+                            else (output_i.argmax(1) == tgt).float()
+                        # record state & transitions
+                        log_probs.append(log_prob_i)
+                        values.append(value_i)
+                        actions.append(action_i)
+                        rewards.append(reward_i)
+                        task_loss.append(task_loss_i)
+                        # record actions
+                        action_sum += action_i.detach().sum(dim=0)
+                        # update the init_prob
+                        init_prob += action_i
+
+                    log_probs, values, actions, rewards, task_loss = torch.stack(log_probs), \
+                                                                     torch.stack(values)[:, :, 0], torch.stack(
+                        actions), torch.stack(rewards), torch.stack(task_loss)
+                    # calculate returns for each step in episode
+                    R = torch.zeros([B]).cuda()
+                    returns = torch.empty([self.args.steps, B]).cuda().float()
+                    for i in reversed(range(self.args.steps)):
+                        R = rewards[i] + self.args.gamma * R
+                        returns[i] = R
+                    # returns = (output_i.argmax(1) == tgt).float()[None, :].repeat([self.args.steps, 1]) - 0.5
+                    if return_avg is None:
+                        return_avg = rewards.sum(0).mean()
+                    else:
+                        return_avg = rewards.sum(0).mean() * 0.05 + return_avg * 0.95
+                    # returns = -task_loss_i[None, :].repeat([self.args.steps, 1])
+                    # policy & value loss
+                    value_loss = F.mse_loss(values, returns)
+                    policy_loss = (-log_probs * (returns - values.detach())).mean()
+                    # task loss
+                    task_loss = task_loss.mean()
+                    loss.append(value_loss + policy_loss + task_loss)
+                loss = torch.stack(loss).mean()
+                output = output_i
             else:
-                init_prob = None
-                overall_feat, (cam_emb, cam_pred, select_prob) = self.model.cam_pred(feat, init_prob, keep_cams, hard)
+                overall_feat = feat.mean(dim=1) if self.model.aggregation == 'mean' else feat.max(dim=1)[0]
                 output = self.model.get_output(overall_feat)
-            loss = self.ce_loss(output, tgt)
+                loss = F.cross_entropy(output, tgt)
 
             pred = torch.argmax(output, 1)
             correct += (pred == tgt).sum().item()
             miss += B - (pred == tgt).sum().item()
-
-            if self.args.select:
-                # reg_conf
-                reg_conf = (1 - F.softmax(cam_emb, dim=1).max(dim=1)[0]).mean()
-                # reg_even
-                # if cam_pred_ema.sum().item() == 0:
-                #     cam_pred_ema = cam_pred.mean(dim=0).detach()
-                # else:
-                #     cam_pred_ema = cam_pred_ema * 0.99 + cam_pred.mean(dim=0).detach() * 0.01
-                # reg_even = -(cam_pred_ema - cam_pred.mean(dim=0)).norm()
-                reg_even = 0
-                for b in range(len(init_prob)):
-                    cam = init_prob[b, 1].item()
-                    if cam_pred_ema[cam].sum().item() == 0:
-                        cam_pred_ema[cam] = cam_pred[b].detach()
-                    reg_even += -(cam_pred_ema[cam] - cam_pred[b]).norm()
-                    cam_pred_ema[cam] = cam_pred_ema[cam] * 0.99 + cam_pred[b].detach() * 0.01
-                reg_even /= B
-                # loss
-                loss = loss + reg_conf * self.args.beta_conf + reg_even * self.args.beta_even
-                # record
-                select_prob_sum += select_prob.detach().sum(dim=0)
 
             optimizer.zero_grad()
             loss.backward()
@@ -105,35 +116,31 @@ class ClassifierTrainer(object):
                 # print(cyclic_scheduler.last_epoch, optimizer.param_groups[0]['lr'])
                 t1 = time.time()
                 t_epoch = t1 - t0
-                print(f'Train Epoch: {epoch}, Batch:{(batch_idx + 1)}, '
-                      f'loss: {losses / (batch_idx + 1):.3f}, prec: {100. * correct / (correct + miss):.1f}%, '
-                      f'Time: {t_epoch:.1f}' + (f', prob: {select_prob.detach().max(dim=1)[0].mean().item():.3f}, '
-                                                f'reg_conf: {reg_conf.item():.3f}, reg_even: {reg_even.item():.3f}'
-                                                if self.args.select and init_prob is not None else ''))
-                if self.args.select:
+                print(f'Train epoch: {epoch}, batch:{(batch_idx + 1)}, '
+                      f'loss: {losses / (batch_idx + 1):.3f}, time: {t_epoch:.1f}')
+                if self.args.steps:
+                    print(f'value loss: {value_loss:.3f}, policy loss: {policy_loss:.3f}, return: {return_avg:.2f}')
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                                   zip(range(N), F.normalize(select_prob_sum, p=1, dim=0).cpu())))
+                                   zip(range(N), F.normalize(action_sum, p=1, dim=0).cpu())))
                 pass
-            del imgs, keep_cams, init_prob
-            del cam_emb, cam_pred, select_prob
-            del loss, output, tgt, pred
-            del reg_conf, reg_even
         return losses / len(dataloader), correct / (correct + miss) * 100.0
 
-    def test(self, dataloader, init_cam=None, visualize=False):
+    def test(self, dataloader, init_cam=None):
         t0 = time.time()
         self.model.eval()
         losses, correct, miss = 0, 0, 1e-8
-        selected_cams = []
+        action_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
             # with autocast():
             with torch.no_grad():
-                output, _, (cam_emb, cam_pred, select_prob) = self.model(imgs, None, self.args.down, init_cam)
-            loss = self.ce_loss(output, tgt)
+                output, _, (log_probs, values, actions) = self.model(imgs, None, self.args.down, init_cam,
+                                                                     self.args.steps)
+            loss = F.cross_entropy(output, tgt)
             if init_cam is not None:
-                selected_cams.extend(select_prob.argmax(dim=1).detach().cpu().numpy().tolist())
+                # record actions
+                action_sum += torch.cat(actions).sum(dim=0)
 
             losses += loss.item()
 
@@ -142,9 +149,9 @@ class ClassifierTrainer(object):
             miss += B - (pred == tgt).sum().item()
 
         if init_cam is not None:
-            unique_cams, unique_freq = np.unique(selected_cams, return_counts=True)
+            idx = action_sum.nonzero().cpu()[:, 0]
             print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                           zip(unique_cams, unique_freq / len(selected_cams))))
+                           zip(idx, F.normalize(action_sum, p=1, dim=0).cpu()[idx])))
 
         print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%, '
               f'time: {time.time() - t0:.1f}s')

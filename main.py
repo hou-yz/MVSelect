@@ -93,7 +93,7 @@ def main(args):
                                 img_reduce=args.img_reduce, world_kernel_size=args.world_kernel_size,
                                 img_kernel_size=args.img_kernel_size)
 
-    if args.select:
+    if args.steps:
         args.lr /= 5
 
     def seed_worker(worker_id):
@@ -110,13 +110,12 @@ def main(args):
 
     # logging
     if args.resume is None or not args.eval:
-        select_settings = f'gumbel{int(args.gumbel)}_hard{int(args.hard)}_conf{args.beta_conf}even{args.beta_even}' \
-                          f'cover{args.beta_coverage}_' if not args.random_select else 'random_select_'
+        select_settings = f'steps{args.steps}_'
         lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
-                      f'select{args.select_lr_ratio}' if args.select and not args.random_select else ''
+                      f'select{args.select_lr_ratio}' if args.steps else ''
         logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
                  f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
-                 f'{select_settings if args.select else ""}' \
+                 f'{select_settings if args.steps else ""}' \
                  f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
         os.makedirs(logdir, exist_ok=True)
         copy_tree('src', logdir + '/scripts/src')
@@ -133,14 +132,13 @@ def main(args):
 
     # model
     if args.task == 'mvcnn':
-        model = MVCNN(train_set, args.arch, args.aggregation,
-                      gumbel=args.gumbel, random_select=args.random_select).cuda()
+        model = MVCNN(train_set, args.arch, args.aggregation).cuda()
     else:
-        model = MVDet(train_set, args.arch, args.aggregation, args.use_bottleneck, args.hidden_dim, args.outfeat_dim,
-                      gumbel=args.gumbel, random_select=args.random_select).cuda()
+        model = MVDet(train_set, args.arch, args.aggregation,
+                      args.use_bottleneck, args.hidden_dim, args.outfeat_dim).cuda()
 
     # load checkpoint
-    if args.select:
+    if args.steps:
         with open(f'logs/{args.dataset}/{args.arch}_performance.txt', 'r') as fp:
             result_str = fp.read()
         print(result_str)
@@ -159,11 +157,11 @@ def main(args):
         model.load_state_dict(model_dict)
 
     param_dicts = [{"params": [p for n, p in model.named_parameters()
-                               if 'base' not in n and 'cam_' not in n and p.requires_grad],
+                               if 'base' not in n and 'select' not in n and p.requires_grad],
                     "lr": args.lr * args.other_lr_ratio, },
                    {"params": [p for n, p in model.named_parameters() if 'base' in n and p.requires_grad],
                     "lr": args.lr * args.base_lr_ratio, },
-                   {"params": [p for n, p in model.named_parameters() if 'cam_' in n and p.requires_grad],
+                   {"params": [p for n, p in model.named_parameters() if 'select' in n and p.requires_grad],
                     "lr": args.lr * args.select_lr_ratio, }, ]
     optimizer = optim.Adam(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
@@ -182,7 +180,7 @@ def main(args):
 
     def test_select(dataloader, result_type=('prec',)):
         t0 = time.time()
-        if args.select:
+        if args.steps:
             loss_s, prec_s = [], []
             for init_cam in range(train_set.num_cam):
                 print(f'init camera {init_cam}: MVSelect')
@@ -192,7 +190,7 @@ def main(args):
             loss, prec = np.average(loss_s), np.average(np.array(prec_s), axis=0)
             result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, prec))
             print('*************************************')
-            print(f'MVSelect average {result_str}, time: {time.time() - t0:.1f}')
+            print(f'MVSelect average {result_str} time: {time.time() - t0:.1f}')
             print('*************************************')
         else:
             print(f'using all cameras:')
@@ -214,7 +212,7 @@ def main(args):
         instance_lvl_max_prec_s = np.array(instance_lvl_max_prec_s)
         result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec_s.mean(0)))
         print('*************************************')
-        print(f'oracle average {result_str}, time: {time.time() - t0:.1f}')
+        print(f'oracle average {result_str} time: {time.time() - t0:.1f}')
         print('*************************************')
         return loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s
 
@@ -230,7 +228,7 @@ def main(args):
         # trainer.test(test_loader)
         for epoch in tqdm.tqdm(range(1, args.epochs + 1)):
             print('Training...')
-            train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler, hard=args.hard, )
+            train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
                 test_loss, test_prec = test_select(test_loader, result_type=result_type)
@@ -292,16 +290,15 @@ def main(args):
             with open(f'{logdir}/{fname}', 'r') as fp:
                 if i == 0:
                     print(fp.read())
-            if args.resume is None and not args.random_select and i == 0:
+            if args.resume is None and i == 0:
                 shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
     print('Test loaded model...')
     print(logdir)
-    # if not args.select:
-    #     log_best2cam_strategy(result_type)
-    # else:
-    #     trainer.test(test_loader)
-    trainer.test(test_loader)
+    if args.steps == 0:
+        log_best2cam_strategy(result_type)
+    else:
+        trainer.test(test_loader)
 
 
 if __name__ == '__main__':
@@ -318,7 +315,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=None, help='learning rate')
     parser.add_argument('--base_lr_ratio', type=float, default=1.0)
-    parser.add_argument('--select_lr_ratio', type=float, default=1.0)
+    parser.add_argument('--select_lr_ratio', type=float, default=10.0)
     parser.add_argument('--other_lr_ratio', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)
@@ -326,13 +323,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument('--deterministic', type=str2bool, default=False)
     # MVSelect settings
+    parser.add_argument('--steps', type=int, default=0,
+                        help='number of camera views to choose. if 0, then no selection')
+    parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor (default: 0.99)')
     parser.add_argument('--down', type=int, default=1, help='down sample the image to 1/N size')
-    parser.add_argument('--select', type=str2bool, default=False)
-    parser.add_argument('--random_select', action='store_true')
-    parser.add_argument('--gumbel', type=str2bool, default=True)
-    parser.add_argument('--hard', type=str2bool, default=True)
-    parser.add_argument('--beta_conf', type=float, default=0.0)
-    parser.add_argument('--beta_even', type=float, default=0.0)
     # multiview detection specific settings
     parser.add_argument('--eval_init_cam', type=str2bool, default=False,
                         help='only consider pedestrians covered by the initial camera')
@@ -349,7 +343,6 @@ if __name__ == '__main__':
     parser.add_argument('--world_kernel_size', type=int, default=10)
     parser.add_argument('--img_reduce', type=int, default=12)
     parser.add_argument('--img_kernel_size', type=int, default=10)
-    parser.add_argument('--beta_coverage', type=float, default=0.0)
 
     args = parser.parse_args()
 
