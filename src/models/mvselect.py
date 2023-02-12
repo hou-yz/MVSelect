@@ -2,6 +2,31 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.distributions import Categorical
+
+
+def setup_args(feat, init_prob, keep_cams=None):
+    B, N, C, H, W = feat.shape
+    # init_prob should be of shape [B, N] in binary form
+    if isinstance(init_prob, int):
+        init_prob = F.one_hot(torch.tensor(init_prob).repeat(B), num_classes=N)
+    elif isinstance(init_prob, np.ndarray):
+        init_prob = F.one_hot(torch.tensor(init_prob), num_classes=N)
+    init_prob = init_prob.bool().to(feat.device)
+    if keep_cams is None:
+        keep_cams = torch.ones([B, N], dtype=torch.bool)
+    keep_cams = keep_cams.to(feat.device)
+    cam_candidate = ~init_prob & keep_cams
+    return init_prob, keep_cams, cam_candidate
+
+
+def create_pos_embedding(L, hidden_dim=128, temperature=10000, ):
+    position = torch.arange(L).unsqueeze(1) / L * 2 * np.pi
+    div_term = torch.exp(torch.arange(0, hidden_dim, 2) / hidden_dim * (-np.log(temperature)))
+    pe = torch.zeros(L, hidden_dim)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe
 
 
 def masked_softmax(input, dim=-1, mask=None, epsilon=1e-8):
@@ -30,89 +55,70 @@ def softmax_to_hard(y_soft, dim=-1):
     return ret
 
 
-def aggregate_init(feat, init_prob, aggregation):
+def get_init_feat(feat, init_prob, aggregation):
     init_feat = feat * init_prob[:, :, None, None, None]
     init_feat = init_feat.sum(dim=1) / init_prob.sum(dim=1).view(-1, 1, 1, 1) if aggregation == 'mean' \
         else init_feat.max(dim=1)[0]
     return init_feat
 
 
-def aggregate_init_selection(init_feat, init_prob, feat, select_prob, aggregation):
-    select_feat = (feat * select_prob[:, :, None, None, None]).sum(1)
+def get_joint_feat(feat, init_prob, action, aggregation):
+    init_feat = get_init_feat(feat, init_prob, aggregation)
+    select_feat = (feat * action[:, :, None, None, None]).sum(1)
     if aggregation == 'mean':
         overall_feat = (init_feat * init_prob.sum(1).view(-1, 1, 1, 1) + select_feat) / \
-                       (init_prob + select_prob).sum(1).view(-1, 1, 1, 1)
+                       (init_prob + action).sum(1).view(-1, 1, 1, 1)
     else:
         overall_feat = torch.stack([init_feat, select_feat], 1).max(1)[0]
     return overall_feat
 
 
-class CamPredModule(nn.Module):
-    def __init__(self, num_cam, hidden_dim, kernel_size=1, gumbel=True, random_select=False, aggregation='max'):
+class CamSelect(nn.Module):
+    def __init__(self, num_cam, hidden_dim, kernel_size=1, aggregation='max'):
         super().__init__()
-        # self.cam_feat = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-        #                               nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
-        self.kernel_size = kernel_size
+        self.aggregation = aggregation
         if kernel_size == 1:
             stride, padding = 1, 0
         elif kernel_size == 3:
             stride, padding = 2, 1
         else:
             raise Exception
-        self.cam_feat = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(),
-                                      nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(), )
-        self.cam_feat[-2].weight.data.fill_(0)
-        self.cam_feat[-2].bias.data.fill_(0)
-        # self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
-        self.cam_emb = nn.Parameter(torch.zeros([num_cam, num_cam]))
-        self.cam_pred = nn.Linear(hidden_dim, num_cam, bias=False)
-        self.cam_pred.weight.data.fill_(0)
-        self.gumbel = gumbel
-        self.random_select = random_select
-        self.aggregation = aggregation
+        self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(),
+                                         nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(), )
+        self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
+        self.emb_branch = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+                                        nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
+        self.action_head = nn.Linear(hidden_dim, num_cam)
+        self.action_head.weight.data.fill_(0)
+        self.action_head.bias.data.fill_(0)
+        self.value_head = nn.Linear(hidden_dim, 1)
+        self.value_head.weight.data.fill_(0)
+        self.value_head.bias.data.fill_(0)
+        # self.emb_action = nn.Parameter(torch.zeros([num_cam, num_cam]))
+        # self.emb_value = nn.Parameter(torch.zeros([num_cam, 1]))
 
-    def forward(self, feat, init_prob, keep_cams=None, hard=None, ):
+    def forward(self, feat, init_prob, keep_cams=None):
         B, N, C, H, W = feat.shape
-        # init_prob should be of shape [B, N] in binary form
-        if init_prob is None:
-            cam_emb, cam_pred, select_prob = None, None, None
-            overall_feat = feat.mean(dim=1) if self.aggregation == 'mean' else feat.max(dim=1)[0]
-            return overall_feat, (cam_emb, cam_pred, select_prob)
-        elif isinstance(init_prob, int):
-            init_prob = F.one_hot(torch.tensor(init_prob).repeat(B), num_classes=N)
-        elif isinstance(init_prob, np.ndarray):
-            init_prob = F.one_hot(torch.tensor(init_prob), num_classes=N)
-        init_prob = init_prob.bool().to(feat.device)
-        if keep_cams is None:
-            keep_cams = torch.ones([B, N], dtype=torch.bool)
-        keep_cams = keep_cams.to(feat.device)
-        if not self.training or hard is None:
-            hard = True
-        cam_candidate = ~init_prob & keep_cams
-        init_feat = aggregate_init(feat, init_prob, self.aggregation)
+        init_prob, keep_cams, cam_candidate = setup_args(feat, init_prob, keep_cams)
+        init_feat = get_init_feat(feat, init_prob, self.aggregation)
 
-        if not self.random_select:
-            cam_emb = init_prob.float() @ self.cam_emb
-            # cam_emb = F.layer_norm(self.cam_emb(init_prob.nonzero()[:, 1]), [N])
-            # cam_feat = self.cam_feat(init_feat[:, :, None, None] if len(init_feat.shape) == 2 else init_feat)
-            cam_feat = self.cam_feat(init_feat).amax(dim=[2, 3])
-            cam_pred = self.cam_pred(cam_feat)
-            logits = cam_emb + cam_pred
-        else:
-            logits = cam_pred = cam_emb = torch.randn([B, N], device=feat.device)
+        cam_emb = init_prob.float() @ self.cam_emb
+        cam_emb = self.emb_branch(cam_emb)
+        cam_feat = self.feat_branch(init_feat).amax(dim=[2, 3])
+        action_prob = F.softmax(self.action_head(cam_emb + cam_feat), dim=-1) * cam_candidate
+        state_value = self.value_head(cam_emb + cam_feat)
+
+        # action_prob = F.softmax(init_prob.float() @ self.emb_action, dim=-1) * cam_candidate
+        # state_value = init_prob.float() @ self.emb_value
+
         if self.training:
-            assert hard is True or hard is False, 'plz provide bool type {hard}'
-            # gumbel softmax trick
-            if self.gumbel:
-                select_prob = gumbel_softmax(logits, dim=1, mask=cam_candidate)
-            else:
-                select_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
-            select_prob_hard = softmax_to_hard(select_prob)
+            m = Categorical(action_prob)
+            action = m.sample()
+            log_prob = m.log_prob(action)
         else:
-            select_prob = masked_softmax(logits, dim=1, mask=cam_candidate)
-            selected_cam = torch.argmax(select_prob, dim=1)
-            select_prob_hard = F.one_hot(selected_cam, num_classes=N)
+            action = torch.argmax(action_prob, dim=-1)
+            log_prob = None
+        action = F.one_hot(action, num_classes=N).bool()
 
-        select_prob = select_prob_hard if hard is True or not self.training else select_prob
-        overall_feat = aggregate_init_selection(init_feat, init_prob, feat, select_prob, self.aggregation)
-        return overall_feat, (cam_emb, cam_pred, select_prob)
+        overall_feat = get_joint_feat(feat, init_prob, action, self.aggregation)
+        return overall_feat, (log_prob, state_value, action)

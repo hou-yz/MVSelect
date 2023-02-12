@@ -7,12 +7,12 @@ import torchvision.transforms as T
 import torchvision.models as models
 import matplotlib.pyplot as plt
 from src.models.multiview_base import MultiviewBase
-from src.models.mvselect import CamPredModule
+from src.models.mvselect import CamSelect
 
 
 class MVCNN(MultiviewBase):
-    def __init__(self, dataset, arch='resnet18', aggregation='max', gumbel=True, random_select=False):
-        super().__init__(dataset, aggregation, )
+    def __init__(self, dataset, arch='resnet18', aggregation='max'):
+        super().__init__(dataset, aggregation)
 
         if arch == 'resnet18':
             self.base = nn.Sequential(*list(models.resnet18(pretrained=True).children())[:-2])
@@ -29,7 +29,7 @@ class MVCNN(MultiviewBase):
             raise Exception('architecture currently support [vgg11, resnet18]')
 
         # select camera based on initialization
-        self.cam_pred = CamPredModule(dataset.num_cam, base_dim, 1, gumbel, random_select)
+        self.select_module = CamSelect(dataset.num_cam, base_dim, 1, aggregation)
         pass
 
     def get_feat(self, imgs, M, down=1, visualize=False):
@@ -57,7 +57,7 @@ if __name__ == '__main__':
     init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
     keep_cams[0, 3] = 0
     model.train()
-    res = model(imgs.cuda(), None, 2, init_prob, keep_cams)
+    res = model(imgs.cuda(), None, 2, init_prob, 3, keep_cams)
     # model.eval()
     # res = model(imgs.cuda(), None, init_prob, override=5)
     # with torch.no_grad():

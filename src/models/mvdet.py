@@ -7,7 +7,7 @@ import torchvision.transforms as T
 from kornia.geometry import warp_perspective
 from src.models.resnet import resnet18
 from src.models.shufflenetv2 import shufflenet_v2_x0_5
-from src.models.mvselect import CamPredModule
+from src.models.mvselect import CamSelect
 from src.models.multiview_base import MultiviewBase
 from src.utils.image_utils import img_color_denormalize, array2heatmap
 from src.utils.projection import get_worldcoord_from_imgcoord_mat, project_2d_points
@@ -32,8 +32,7 @@ def output_head(in_dim, feat_dim, out_dim):
 
 class MVDet(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max',
-                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, z=0,
-                 gumbel=False, random_select=False):
+                 use_bottleneck=True, hidden_dim=128, outfeat_dim=0, z=0):
         super().__init__(dataset, aggregation)
         self.Rimg_shape, self.Rworld_shape = np.array(dataset.Rimg_shape), np.array(dataset.Rworld_shape)
         self.img_reduce = dataset.img_reduce
@@ -84,7 +83,7 @@ class MVDet(MultiviewBase):
                                         nn.Conv2d(hidden_dim, hidden_dim, 3, padding=4, dilation=4), nn.ReLU(), )
 
         # select camera based on initialization
-        self.cam_pred = CamPredModule(dataset.num_cam, hidden_dim, 3, gumbel, random_select)
+        self.select_module = CamSelect(dataset.num_cam, hidden_dim, 3, aggregation)
 
         # world heads
         self.world_heatmap = output_head(hidden_dim, outfeat_dim, 1)
@@ -193,10 +192,8 @@ def test():
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
     keep_cams[0, 3] = 0
     init_cam = 0
-    model.load_state_dict(torch.load(
-        '/home/houyz/Code/MVselect/logs/wildtrack/resnet18_max_lr0.0005_b2_e10_dropcam0.0_2023-02-05_23-06-40/model.pth'))
     model.train()
-    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, 2)
+    (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, 2, init_cam, 3)
     # xysc_train = ctdet_decode(world_heatmap, world_offset)
     # model.eval()
     # (world_heatmap, world_offset), _, cam_eval = model(imgs.cuda(), affine_mats, 2, init_cam, keep_cams, override=3)
