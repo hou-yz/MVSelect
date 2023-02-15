@@ -16,17 +16,18 @@ class MultiviewBase(nn.Module):
         feat, aux_res = self.get_feat(imgs, M, down, visualize)
         if self.select_module is None or init_prob is None or steps == 0:
             overall_feat = feat.mean(dim=1) if self.aggregation == 'mean' else feat.max(dim=1)[0]
-            selection_res = (None, None, None)
+            selection_res = (None, None, None, None)
         else:
             init_prob, _, _ = setup_args(imgs, init_prob)
-            log_probs, values, actions = [], [], []
+            log_probs, values, actions, entropies = [], [], [], []
             for _ in range(steps):
-                overall_feat, (log_prob, state_value, action) = self.select_module(feat, init_prob, keep_cams)
+                overall_feat, (log_prob, state_value, action, entropy) = self.select_module(feat, init_prob, keep_cams)
                 init_prob += action
                 log_probs.append(log_prob)
                 values.append(state_value)
                 actions.append(action)
-            selection_res = (log_probs, values, actions)
+                entropies.append(entropy)
+            selection_res = (log_probs, values, actions, entropies)
         overall_res = self.get_output(overall_feat, visualize)
         return overall_res, aux_res, selection_res
 
