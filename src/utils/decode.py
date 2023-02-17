@@ -81,13 +81,13 @@ def mvdet_decode(scoremap, offset=None, reduce=4):
     B, C, H, W = scoremap.shape
     # scoremap = _nms(scoremap)
 
-    xy = torch.nonzero(torch.ones_like(scoremap[:, 0])).view([B, H * W, 3])[:, :, [2, 1]].float()
+    xy = torch.nonzero(torch.ones_like(scoremap.detach()[:, 0])).view([B, H * W, 3])[:, :, [2, 1]].float()
     if offset is not None:
-        offset = offset.permute(0, 2, 3, 1).reshape(B, H * W, 2)
+        offset = offset.detach().permute(0, 2, 3, 1).reshape(B, H * W, 2)
         xy = xy + offset
     else:
         xy = xy + 0.5
     xy *= reduce
-    scores = scoremap.permute(0, 2, 3, 1).reshape(B, H * W, 1)
+    scores = scoremap.detach().permute(0, 2, 3, 1).reshape(B, H * W, 1)
 
     return torch.cat([xy, scores], dim=2)

@@ -64,6 +64,7 @@ def main(args):
         args.task = 'mvcnn'
         result_type = ['prec']
         args.lr = 5e-5 if args.lr is None else args.lr
+        args.select_lr = 2e-5 if args.select_lr is None else args.select_lr
         args.batch_size = 8 if args.batch_size is None else args.batch_size
 
         train_set = imgDataset(fpath, num_cam, mode='multi', split='train', )
@@ -80,6 +81,7 @@ def main(args):
         args.task = 'mvdet'
         result_type = ['moda', 'modp', 'prec', 'recall']
         args.lr = 5e-4 if args.lr is None else args.lr
+        args.select_lr = 1e-3 if args.select_lr is None else args.select_lr
         args.batch_size = 1 if args.batch_size is None else args.batch_size
 
         train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
@@ -314,9 +316,9 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=None, help='learning rate')
+    parser.add_argument('--lr', type=float, default=None, help='learning rate for task network')
+    parser.add_argument('--select_lr', type=float, default=None, help='learning rate for MVselect')
     parser.add_argument('--base_lr_ratio', type=float, default=1.0)
-    parser.add_argument('--select_lr', type=float, default=1e-3)
     parser.add_argument('--other_lr_ratio', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--resume', type=str, default=None)

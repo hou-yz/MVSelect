@@ -17,13 +17,111 @@ from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
 from src.models.mvselect import update_ema_variables, get_eps_thres
 
 
-class PerspectiveTrainer(object):
+class BaseTrainer(object):
     def __init__(self, model, logdir, args, ):
-        super(PerspectiveTrainer, self).__init__()
         self.model = model
         self.args = args
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+
+    def rollout(self, step, state, tgt, eps_thres):
+        feat, init_prob, keep_cams = state
+        overall_feat, (log_prob, value, action, entropy) = \
+            self.model.select_module(feat, init_prob, keep_cams, eps_thres)
+        task_loss, reward = self.task_loss_reward(overall_feat, tgt, step)
+        # reward += entropy.detach() * self.args.beta_entropy
+        done = torch.ones_like(reward) * (step == self.args.steps - 1)
+        return task_loss, reward, done, (log_prob, value, action, entropy)
+
+    def expand_episode(self, feat, keep_cams, tgt, eps_thres, misc):
+        B, N, _, _, _ = feat.shape
+        loss = []
+        action_sum, return_avg = misc
+        # consider all cameras as initial one
+        for init_cam in range(N):
+            log_probs, values, actions, entropies, rewards, task_loss_s = [], [], [], [], [], []
+            # get result from using initial camera feature
+            init_prob = F.one_hot(torch.tensor(init_cam).repeat(B), num_classes=N).cuda()
+
+            # rollout episode
+            for i in range(self.args.steps):
+                task_loss, reward, done, (log_prob, value, action, entropy) = \
+                    self.rollout(i, (feat, init_prob, keep_cams), tgt, eps_thres)
+                # record state & transitions
+                log_probs.append(log_prob)
+                # values.append(value_i[:, 0])
+                values.append((value * action).sum(1))
+                actions.append(action)
+                entropies.append(entropy)
+                rewards.append(reward)
+                task_loss_s.append(task_loss)
+                # stats
+                action_sum += action.detach().sum(dim=0)
+                # update the init_prob
+                init_prob += action
+
+            log_probs, values, actions, entropies, rewards, task_loss_s = \
+                torch.stack(log_probs), torch.stack(values), torch.stack(actions), \
+                    torch.stack(entropies), torch.stack(rewards), torch.stack(task_loss_s)
+            # calculate returns for each step in episode
+            R = torch.zeros([B]).cuda()
+            returns = torch.empty([self.args.steps, B]).cuda().float()
+            for i in reversed(range(self.args.steps)):
+                R = rewards[i] + self.args.gamma * R
+                returns[i] = R
+            return_avg = returns.mean(1) if return_avg is None else returns.mean(1) * 0.05 + return_avg * 0.95
+            # policy & value loss
+            value_loss = F.smooth_l1_loss(values, returns)
+            # policy_loss = (-log_probs * (returns - values.detach())).mean()
+            # task loss
+            task_loss = task_loss_s.mean()
+            # loss.append(value_loss + policy_loss + task_loss -
+            #             entropies.mean() * self.args.beta_entropy * eps_thres)
+            loss.append(value_loss + task_loss)
+        loss = torch.stack(loss).mean()
+        return loss, (action_sum, return_avg, value_loss)
+
+    def task_loss_reward(self, overall_feat, tgt, step):
+        raise NotImplementedError
+
+    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
+        raise NotImplementedError
+
+    def test(self, dataloader, init_cam=None):
+        raise NotImplementedError
+
+    def test_cam_combination(self, dataloader, init_cam):
+        raise NotImplementedError
+
+
+class PerspectiveTrainer(BaseTrainer):
+    def __init__(self, model, logdir, args, ):
+        super(PerspectiveTrainer, self).__init__(model, logdir, args, )
+
+    def task_loss_reward(self, overall_feat, tgt, step):
+        world_heatmap, world_offset = self.model.get_output(overall_feat)
+        task_loss = focal_loss(world_heatmap, tgt, reduction='none')
+        reward = torch.zeros_like(task_loss).cuda() if step < self.args.steps - 1 else -task_loss.detach()
+
+        # dataloader, frame = misc
+        # modas = torch.zeros([B]).cuda()
+        # xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset,
+        #                    reduce=dataloader.dataset.world_reduce).cpu()
+        # grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
+        # if dataloader.dataset.base.indexing == 'xy':
+        #     positions = grid_xy
+        # else:
+        #     positions = grid_xy[:, :, [1, 0]]
+        # for b in range(B):
+        #     ids = scores[b].squeeze() > self.args.cls_thres
+        #     pos, s = positions[b, ids], scores[b, ids, 0]
+        #     ids, count = nms(pos, s, 20, np.inf)
+        #     res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
+        #     moda, modp, prec, recall, stats = evaluateDetection_py(res, f'{dataloader.dataset.gt_fname}.txt', frame)
+        #     modas[b] = moda
+        # reward = torch.zeros([B]).cuda() if step < self.args.steps - 1 else modas / 100
+
+        return task_loss, reward
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
         self.model.train()
@@ -39,65 +137,9 @@ class PerspectiveTrainer(object):
                 imgs_gt[key] = imgs_gt[key].flatten(0, 1)
             feat, (imgs_heatmap, imgs_offset, imgs_wh) = self.model.get_feat(imgs.cuda(), affine_mats, self.args.down)
             if self.args.steps:
-                loss = []
                 eps_thres = get_eps_thres(epoch - 1 + batch_idx / len(dataloader), self.args.epochs)
-                # consider all cameras as initial one
-                for cam in range(N):
-                    log_probs, values, actions, entropies, rewards, task_loss = [], [], [], [], [], []
-                    # get result from using initial camera feature
-                    init_prob = F.one_hot(torch.tensor(cam).repeat(B), num_classes=N).cuda()
-                    # init_prob = F.one_hot(torch.randint(N, [B]), num_classes=N).cuda()
-                    # with torch.no_grad():
-                    #     world_heatmap_0, _ = self.model.get_output((feat * init_prob[:, :, None, None, None]).sum(1))
-                    # task_loss_last = focal_loss(world_heatmap_0, world_gt['heatmap'], reduction='none')
-
-                    # rollout episode
-                    for i in range(self.args.steps):
-                        overall_feat_i, (log_prob_i, value_i, action_i, entropy_i) = \
-                            self.model.select_module(feat, init_prob, keep_cams, eps_thres)
-                        world_heatmap_i, _ = self.model.get_output(overall_feat_i)
-                        task_loss_i = focal_loss(world_heatmap_i, world_gt['heatmap'], reduction='none')
-                        # decrease in task loss means higher performance, hence positive reward
-                        # reward_i = (task_loss_last - task_loss_i).detach()
-                        # task_loss_last = task_loss_i.detach()
-                        reward_i = torch.zeros_like(task_loss_i) if i < self.args.steps - 1 else -task_loss_i
-                        # reward_i += entropy_i.detach() * self.args.beta_entropy
-                        # record state & transitions
-                        log_probs.append(log_prob_i)
-                        # values.append(value_i[:, 0])
-                        values.append((value_i * action_i).sum(1))
-                        actions.append(action_i)
-                        entropies.append(entropy_i)
-                        rewards.append(reward_i)
-                        task_loss.append(task_loss_i)
-                        # stats
-                        action_sum += action_i.detach().sum(dim=0)
-                        # update the init_prob
-                        init_prob += action_i
-
-                    log_probs, values, actions, entropies, rewards, task_loss = \
-                        torch.stack(log_probs), torch.stack(values), torch.stack(actions), \
-                            torch.stack(entropies), torch.stack(rewards), torch.stack(task_loss)
-                    # calculate returns for each step in episode
-                    R = torch.zeros([B]).cuda()
-                    returns = torch.empty([self.args.steps, B]).cuda().float()
-                    for i in reversed(range(self.args.steps)):
-                        R = rewards[i] + self.args.gamma * R
-                        returns[i] = R
-                    # returns = -task_loss_i[None, :].repeat([self.args.steps, 1])
-                    if return_avg is None:
-                        return_avg = returns.mean(1)
-                    else:
-                        return_avg = returns.mean(1) * 0.05 + return_avg * 0.95
-                    # policy & value loss
-                    value_loss = F.smooth_l1_loss(values, returns)
-                    # policy_loss = (-log_probs * (returns - values.detach())).mean()
-                    # task loss
-                    task_loss = task_loss.mean()
-                    # loss.append(value_loss + policy_loss + task_loss -
-                    #             entropies.mean() * self.args.beta_entropy * eps_thres)
-                    loss.append(value_loss + task_loss)
-                loss = torch.stack(loss).mean()
+                loss, (action_sum, return_avg, value_loss) = \
+                    self.expand_episode(feat, keep_cams, world_gt['heatmap'], eps_thres, (action_sum, return_avg))
             else:
                 overall_feat = feat.mean(dim=1) if self.model.aggregation == 'mean' else feat.max(dim=1)[0]
                 world_heatmap, world_offset = self.model.get_output(overall_feat)

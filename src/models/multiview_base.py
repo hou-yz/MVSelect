@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from src.models.mvselect import get_init_feat, get_joint_feat, setup_args
 
 
+
 class MultiviewBase(nn.Module):
     def __init__(self, dataset, aggregation='max'):
         super().__init__()
@@ -32,19 +33,16 @@ class MultiviewBase(nn.Module):
         return overall_res, aux_res, selection_res
 
     def get_feat(self, imgs, M, down=1, visualize=False):
-        feat, aux_res = None, None
-        return feat, aux_res
+        raise NotImplementedError
 
     def get_output(self, overall_feat, visualize=False):
-        overall_result = None
-        return overall_result
+        raise NotImplementedError
 
     def forward_override_combination(self, imgs, M, down, init_prob):
         B, N, C, H, W = imgs.shape
         init_prob, _, _ = setup_args(imgs, init_prob)
 
         feat, aux_res = self.get_feat(imgs, M, down)
-        init_feat = get_init_feat(feat, init_prob, self.aggregation)
         overall_feat_s, selection_prob_s = [], []
         for cam in range(self.num_cam):
             action = F.one_hot(torch.tensor(cam).repeat(B), num_classes=self.num_cam).to(imgs.device)

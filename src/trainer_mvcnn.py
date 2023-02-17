@@ -9,17 +9,20 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
 from src.utils.meters import AverageMeter
+from src.trainer import BaseTrainer
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
 from src.models.mvselect import update_ema_variables, get_eps_thres
 
 
-class ClassifierTrainer(object):
+class ClassifierTrainer(BaseTrainer):
     def __init__(self, model, logdir, args, ):
-        super(ClassifierTrainer, self).__init__()
-        self.model = model
-        self.args = args
-        self.logdir = logdir
-        self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        super(ClassifierTrainer, self).__init__(model, logdir, args, )
+
+    def task_loss_reward(self, overall_feat, tgt, step):
+        output = self.model.get_output(overall_feat)
+        task_loss = F.cross_entropy(output, tgt, reduction='none')
+        reward = torch.zeros_like(task_loss) if step < self.args.steps - 1 else (output.argmax(1) == tgt).float()
+        return task_loss, reward
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=200):
         self.model.train()
@@ -34,75 +37,17 @@ class ClassifierTrainer(object):
             imgs, tgt = imgs.cuda(), tgt.cuda()
             feat, _ = self.model.get_feat(imgs, None, self.args.down)
             if self.args.steps:
-                loss = []
                 eps_thres = get_eps_thres(epoch - 1 + batch_idx / len(dataloader), self.args.epochs)
-                # consider all cameras as initial one
-                for cam in range(N):
-                    log_probs, values, actions, entropies, rewards, task_loss = [], [], [], [], [], []
-                    # get result from using initial camera feature
-                    init_prob = F.one_hot(torch.tensor(cam).repeat(B), num_classes=N).cuda()
-                    # init_prob = F.one_hot(torch.randint(N, [B]), num_classes=N).cuda()
-                    # with torch.no_grad():
-                    #     output_i = self.model.get_output((feat * init_prob[:, :, None, None, None]).sum(1))
-                    # task_loss_last = F.cross_entropy(output_i, tgt, reduction='none')
-
-                    # rollout episode
-                    for i in range(self.args.steps):
-                        overall_feat_i, (log_prob_i, value_i, action_i, entropy_i) = \
-                            self.model.select_module(feat, init_prob, keep_cams, eps_thres)
-                        output_i = self.model.get_output(overall_feat_i)
-                        task_loss_i = F.cross_entropy(output_i, tgt, reduction='none')
-                        # decrease in task loss means higher performance, hence positive reward
-                        # reward_i = (task_loss_last - task_loss_i).detach()
-                        # task_loss_last = task_loss_i.detach()
-                        reward_i = torch.zeros_like(task_loss_i) if i < self.args.steps - 1 \
-                            else (output_i.argmax(1) == tgt).float()
-                        # reward_i += entropy_i.detach() * self.args.beta_entropy
-                        # record state & transitions
-                        log_probs.append(log_prob_i)
-                        # values.append(value_i[:, 0])
-                        values.append((value_i * action_i).sum(1))
-                        actions.append(action_i)
-                        entropies.append(entropy_i)
-                        rewards.append(reward_i)
-                        task_loss.append(task_loss_i)
-                        # stats
-                        action_sum += action_i.detach().sum(dim=0)
-                        # update the init_prob
-                        init_prob += action_i
-
-                    log_probs, values, actions, entropies, rewards, task_loss = \
-                        torch.stack(log_probs), torch.stack(values), torch.stack(actions), \
-                            torch.stack(entropies), torch.stack(rewards), torch.stack(task_loss)
-                    # calculate returns for each step in episode
-                    R = torch.zeros([B]).cuda()
-                    returns = torch.empty([self.args.steps, B]).cuda().float()
-                    for i in reversed(range(self.args.steps)):
-                        R = rewards[i] + self.args.gamma * R
-                        returns[i] = R
-                    # returns = (output_i.argmax(1) == tgt).float()[None, :].repeat([self.args.steps, 1]) - 0.5
-                    if return_avg is None:
-                        return_avg = returns.mean(1)
-                    else:
-                        return_avg = returns.mean(1) * 0.05 + return_avg * 0.95
-                    # policy & value loss
-                    value_loss = F.smooth_l1_loss(values, returns)
-                    # policy_loss = (-log_probs * (returns - values.detach())).mean()
-                    # task loss
-                    task_loss = task_loss.mean()
-                    # loss.append(value_loss + policy_loss + task_loss -
-                    #             entropies.mean() * self.args.beta_entropy * eps_thres)
-                    loss.append(value_loss + task_loss)
-                loss = torch.stack(loss).mean()
-                output = output_i
+                loss, (action_sum, return_avg, value_loss) = \
+                    self.expand_episode(feat, keep_cams, tgt, eps_thres, (action_sum, return_avg))
             else:
                 overall_feat = feat.mean(dim=1) if self.model.aggregation == 'mean' else feat.max(dim=1)[0]
                 output = self.model.get_output(overall_feat)
                 loss = F.cross_entropy(output, tgt)
 
-            pred = torch.argmax(output, 1)
-            correct += (pred == tgt).sum().item()
-            miss += B - (pred == tgt).sum().item()
+                pred = torch.argmax(output, 1)
+                correct += (pred == tgt).sum().item()
+                miss += B - (pred == tgt).sum().item()
 
             optimizer.zero_grad()
             loss.backward()
@@ -130,7 +75,7 @@ class ClassifierTrainer(object):
                     print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                                    zip(range(N), F.normalize(action_sum, p=1, dim=0).cpu())))
                 pass
-        return losses / len(dataloader), correct / (correct + miss) * 100.0
+        return losses / len(dataloader), None if self.args.steps else correct / (correct + miss) * 100.0
 
     def test(self, dataloader, init_cam=None):
         t0 = time.time()
