@@ -89,6 +89,7 @@ class frameDataset(VisionDataset):
         # split = ('train', 'val', 'test'), split_ratio=(0.8, 0.1, 0.1)
         split_ratio = tuple(sum(split_ratio[:i + 1]) for i in range(len(split_ratio)))
         assert split_ratio[-1] == 1
+        self.split = split
         if split == 'train':
             frame_range = range(0, int(self.num_frame * split_ratio[0]))
         elif split == 'val':
