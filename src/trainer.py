@@ -152,7 +152,7 @@ class PerspectiveTrainer(BaseTrainer):
 
             optimizer.zero_grad()
             loss.backward()
-            optimizer.do_steps()
+            optimizer.step()
 
             losses += loss.item()
 

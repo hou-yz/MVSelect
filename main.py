@@ -65,7 +65,7 @@ def main(args):
         args.task = 'mvcnn'
         result_type = ['prec']
         args.lr = 5e-5 if args.lr is None else args.lr
-        args.select_lr = 2e-5 if args.select_lr is None else args.select_lr
+        args.select_lr = 1e-3 if args.select_lr is None else args.select_lr
         args.batch_size = 8 if args.batch_size is None else args.batch_size
 
         train_set = imgDataset(fpath, num_cam, split='train', )
@@ -82,7 +82,7 @@ def main(args):
         args.task = 'mvdet'
         result_type = ['moda', 'modp', 'prec', 'recall']
         args.lr = 5e-4 if args.lr is None else args.lr
-        args.select_lr = 1e-3 if args.select_lr is None else args.select_lr
+        args.select_lr = 2e-5 if args.select_lr is None else args.select_lr
         args.batch_size = 1 if args.batch_size is None else args.batch_size
 
         train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
