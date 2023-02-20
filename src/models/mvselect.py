@@ -56,21 +56,17 @@ def softmax_to_hard(y_soft, dim=-1):
     return ret
 
 
-def get_init_feat(feat, init_prob, aggregation):
-    init_feat = feat * init_prob[:, :, None, None, None]
-    init_feat = init_feat.sum(dim=1) / init_prob.sum(dim=1).view(-1, 1, 1, 1) if aggregation == 'mean' \
-        else init_feat.max(dim=1)[0]
-    return init_feat
-
-
-def get_joint_feat(feat, init_prob, action, aggregation):
-    init_feat = get_init_feat(feat, init_prob, aggregation)
-    select_feat = (feat * action[:, :, None, None, None]).sum(1)
-    if aggregation == 'mean':
-        overall_feat = (init_feat * init_prob.sum(1).view(-1, 1, 1, 1) + select_feat) / \
-                       (init_prob + action).sum(1).view(-1, 1, 1, 1)
+def aggregate_feat(feat, selection=None, aggregation='mean'):
+    if selection is None:
+        overall_feat = feat.mean(dim=1) if aggregation == 'mean' else feat.max(dim=1)[0]
     else:
-        overall_feat = torch.stack([init_feat, select_feat], 1).max(1)[0]
+        overall_feat = feat * selection[:, :, None, None, None]
+        if aggregation == 'mean':
+            overall_feat = overall_feat.sum(dim=1) / (selection.sum(dim=1).view(-1, 1, 1, 1) + 1e-8)
+        elif aggregation == 'max':
+            overall_feat = overall_feat.max(dim=1)[0]
+        else:
+            raise Exception
     return overall_feat
 
 
@@ -100,7 +96,7 @@ class CamSelect(nn.Module):
     def forward(self, feat, init_prob, keep_cams=None, eps_thres=0.0):
         B, N, C, H, W = feat.shape
         init_prob, keep_cams, cam_candidate = setup_args(feat, init_prob, keep_cams)
-        init_feat = get_init_feat(feat, init_prob, self.aggregation)
+        init_feat = aggregate_feat(feat, init_prob, self.aggregation)
 
         cam_emb = init_prob.float() @ self.cam_emb
         cam_emb = self.emb_branch(cam_emb)
@@ -130,7 +126,7 @@ class CamSelect(nn.Module):
             action = m.sample()
 
         action = F.one_hot(action, num_classes=N).bool()
-        overall_feat = get_joint_feat(feat, init_prob, action, self.aggregation)
+        overall_feat = aggregate_feat(feat, init_prob + action, self.aggregation)
         # return overall_feat, (log_prob, state_value, action, entropy)
         return overall_feat, (torch.zeros([B], device=feat.device), action_value,
                               action, torch.zeros([B], device=feat.device))
