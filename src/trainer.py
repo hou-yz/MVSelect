@@ -1,3 +1,4 @@
+import itertools
 import random
 import time
 import copy
@@ -14,7 +15,7 @@ from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
-from src.models.mvselect import update_ema_variables, get_eps_thres
+from src.models.mvselect import aggregate_feat, get_eps_thres
 
 
 class BaseTrainer(object):
@@ -141,7 +142,7 @@ class PerspectiveTrainer(BaseTrainer):
                 loss, (action_sum, return_avg, value_loss) = \
                     self.expand_episode(feat, keep_cams, world_gt['heatmap'], eps_thres, (action_sum, return_avg))
             else:
-                overall_feat = feat.mean(dim=1) if self.model.aggregation == 'mean' else feat.max(dim=1)[0]
+                overall_feat = aggregate_feat(feat, aggregation=self.model.aggregation)
                 world_heatmap, world_offset = self.model.get_output(overall_feat)
                 loss_w_hm = focal_loss(world_heatmap, world_gt['heatmap'])
                 loss_w_off = regL1loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
@@ -235,23 +236,27 @@ class PerspectiveTrainer(BaseTrainer):
                                                  gt_fname,
                                                  dataloader.dataset.base.__name__,
                                                  dataloader.dataset.frames)
-        print(f'moda: {moda:.1f}%, modp: {modp:.1f}%, prec: {precision:.1f}%, recall: {recall:.1f}%, '
-              f'\t loss: {losses / len(dataloader):.6f}, time: {time.time() - t0:.1f}s')
+        print(f'Test, loss: {losses / len(dataloader):.6f}, moda: {moda:.1f}%, modp: {modp:.1f}%, '
+              f'prec: {precision:.1f}%, recall: {recall:.1f}%, time: {time.time() - t0:.1f}s')
 
         return losses / len(dataloader), [moda, modp, precision, recall, ]
 
-    def test_cam_combination(self, dataloader, init_cam):
+    def test_cam_combination(self, dataloader, combinations):
         self.model.eval()
-        loss_s, result_s = [[] for _ in range(self.model.num_cam)], [[] for _ in range(self.model.num_cam)]
-        metric_s, stats_s = [], []
+        t0 = time.time()
+        K, N = combinations.shape
+        loss_s, result_s = [], [[] for _ in range(K)]
+        dataset_lvl_selection_metrics, stats_s = [], []
+
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
-            with torch.no_grad():
-                (world_heatmap, world_offset), _, _ = \
-                    self.model.forward_override_combination(imgs.cuda(), affine_mats, self.args.down, init_cam)
 
-            if self.args.eval_init_cam:
-                world_heatmap *= dataloader.dataset.Rworld_coverage[init_cam].cuda()
+            tgt = world_gt['heatmap'].unsqueeze(0).repeat([K, 1, 1, 1, 1])
+            # K, B, N
+            with torch.no_grad():
+                (world_heatmap, world_offset), _ = \
+                    self.model.forward_override_combination(imgs.cuda(), affine_mats, self.args.down, combinations)
+
             # decode
             xys = mvdet_decode(torch.sigmoid(world_heatmap.flatten(0, 1)), world_offset.flatten(0, 1),
                                reduce=dataloader.dataset.world_reduce).cpu()
@@ -260,42 +265,64 @@ class PerspectiveTrainer(BaseTrainer):
                 positions = grid_xy
             else:
                 positions = grid_xy[:, :, [1, 0]]
-            positions, scores = positions.unflatten(0, [B, N]), scores.unflatten(0, [B, N])
-            for b in range(B):
-                for cam in range(self.model.num_cam):
-                    ids = scores[b, cam].squeeze() > self.args.cls_thres
-                    pos, s = positions[b, cam, ids], scores[b, cam, ids, 0]
+            positions, scores = positions.unflatten(0, [K, B]), scores.unflatten(0, [K, B])
+            for k in range(K):
+                for b in range(B):
+                    ids = scores[k, b].squeeze() > self.args.cls_thres
+                    pos, s = positions[k, b, ids], scores[k, b, ids, 0]
                     ids, count = nms(pos, s, 20, np.inf)
                     res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
-                    result_s[cam].append(res)
-
-                    # Rworld_coverage = dataloader.dataset.Rworld_coverage.cuda()
-                    # H, W = dataloader.dataset.Rworld_shape
-                    # coverages = ((F.one_hot(torch.tensor(init_cam).repeat(B), num_classes=N) +
-                    #               F.one_hot(torch.tensor(cam).repeat(B), num_classes=N)).cuda().float() @
-                    #              Rworld_coverage.view(N, -1).float()).view(-1, 1, H, W).clamp(0, 1)
-                    # loss = self.focal_loss(world_heatmap[[b], cam], world_gt['heatmap'][[b]], coverages.detach()) + \
-                    #        self.args.beta_coverage * (1 - coverages).mean()
-                    loss = focal_loss(world_heatmap[[b], cam], world_gt['heatmap'][[b]])
-                    loss_s[cam].append(loss.cpu().item())
-        result_s = [torch.cat(result_s[cam], 0) for cam in range(self.model.num_cam)]
-        loss_s = np.array(loss_s)
+                    result_s[k].append(res)
+            loss = focal_loss(world_heatmap.flatten(0, 1), tgt.flatten(0, 1), reduction='none')
+            loss_s.append(loss.unflatten(0, [K, B]).cpu().numpy())
+        result_s = [torch.cat(result_s[k], 0) for k in range(K)]
+        loss_s = np.concatenate(loss_s, 1)
         # eval
-        gt_fname = f'{dataloader.dataset.gt_fname}_{init_cam}.txt' \
-            if self.args.eval_init_cam and init_cam is not None else f'{dataloader.dataset.gt_fname}.txt'
-        for cam in range(self.model.num_cam):
-            moda, modp, prec, recall, stats = evaluateDetection_py(result_s[cam], gt_fname,
+        for k in range(K):
+            moda, modp, prec, recall, stats = evaluateDetection_py(result_s[k], f'{dataloader.dataset.gt_fname}.txt',
                                                                    frames=dataloader.dataset.frames)
-            metric_s.append([moda, modp, prec, recall])
+            dataset_lvl_selection_metrics.append([moda, modp, prec, recall])
             stats_s.append(stats)
-        metric_s = np.array(metric_s)
-        tp_per_frame = np.array([stats_s[cam][0] for cam in range(self.model.num_cam)])
-        oracle_result_strategy = np.argmax(tp_per_frame, axis=0)
-        oracle_loss_strategy = np.argmin(loss_s, axis=0)
-        oracle_result = []
-        for frame_idx, frame in enumerate(dataloader.dataset.frames):
-            cam = oracle_result_strategy[frame_idx]
-            oracle_result.append(result_s[cam][result_s[cam][:, 0] == frame])
-        oracle_result = np.concatenate(oracle_result)
-        moda, modp, prec, recall, _ = evaluateDetection_py(oracle_result, gt_fname, frames=dataloader.dataset.frames)
-        return loss_s.mean(1), [moda, modp, prec, recall], metric_s
+        dataset_lvl_selection_metrics = np.array(dataset_lvl_selection_metrics)
+        # K, num_frames
+        tp_s = np.array([stats_s[k][0] for k in range(K)])
+        instance_lvl_strategy = find_instance_lvl_strategy(tp_s, combinations)
+        instance_lvl_oracle = [[] for _ in range(N)]
+        for init_cam in range(N):
+            instance_lvl_oracle_output = []
+            for frame_idx, frame in enumerate(dataloader.dataset.frames):
+                k = instance_lvl_strategy[init_cam, frame_idx]
+                instance_lvl_oracle_output.append(result_s[k][result_s[k][:, 0] == frame])
+            instance_lvl_oracle_output = np.concatenate(instance_lvl_oracle_output)
+            moda, modp, prec, recall, _ = evaluateDetection_py(instance_lvl_oracle_output,
+                                                               f'{dataloader.dataset.gt_fname}.txt',
+                                                               frames=dataloader.dataset.frames)
+            instance_lvl_oracle[init_cam] = [moda, modp, prec, recall]
+        instance_lvl_oracle = np.array(instance_lvl_oracle)
+        result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(['moda', 'modp', 'prec', 'recall'],
+                                                                          instance_lvl_oracle.mean(0)))
+        print('*************************************')
+        print(f'{int(combinations.sum(1).mean())} steps, oracle average {result_str} time: {time.time() - t0:.1f}s')
+        return loss_s.mean(1), dataset_lvl_selection_metrics, instance_lvl_oracle
+
+
+def find_instance_lvl_strategy(rewards, combinations):
+    K, L = rewards.shape
+    K, N = combinations.shape
+    strategy = np.zeros([N, L], dtype=int)
+    for init_cam in range(N):
+        indices = np.nonzero(combinations[:, init_cam] == 1)[0]
+        best_idx = np.argmax(rewards[indices], axis=0)
+        strategy[init_cam] = indices[best_idx]
+    return strategy
+
+
+def find_dataset_lvl_strategy(rewards, combinations):
+    K = rewards.shape
+    K, N = combinations.shape
+    strategy = np.zeros([N], dtype=int)
+    for init_cam in range(N):
+        indices = np.nonzero(combinations[:, init_cam] == 1)[0]
+        best_idx = np.argmax(rewards[indices])
+        strategy[init_cam] = indices[best_idx]
+    return strategy

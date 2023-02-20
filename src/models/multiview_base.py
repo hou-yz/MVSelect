@@ -1,9 +1,9 @@
+import itertools
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from src.models.mvselect import get_init_feat, get_joint_feat, setup_args
-
+from src.models.mvselect import aggregate_feat, setup_args
 
 
 class MultiviewBase(nn.Module):
@@ -16,7 +16,7 @@ class MultiviewBase(nn.Module):
     def forward(self, imgs, M=None, down=1, init_prob=None, steps=0, keep_cams=None, visualize=False):
         feat, aux_res = self.get_feat(imgs, M, down, visualize)
         if self.select_module is None or init_prob is None or steps == 0:
-            overall_feat = feat.mean(dim=1) if self.aggregation == 'mean' else feat.max(dim=1)[0]
+            overall_feat = aggregate_feat(feat, aggregation=self.aggregation)
             selection_res = (None, None, None, None)
         else:
             init_prob, _, _ = setup_args(imgs, init_prob)
@@ -38,22 +38,37 @@ class MultiviewBase(nn.Module):
     def get_output(self, overall_feat, visualize=False):
         raise NotImplementedError
 
-    def forward_override_combination(self, imgs, M, down, init_prob):
+    def forward_override_combination(self, imgs, M, down, combinations):
         B, N, C, H, W = imgs.shape
-        init_prob, _, _ = setup_args(imgs, init_prob)
+        K, N = combinations.shape
 
         feat, aux_res = self.get_feat(imgs, M, down)
-        overall_feat_s, selection_prob_s = [], []
-        for cam in range(self.num_cam):
-            action = F.one_hot(torch.tensor(cam).repeat(B), num_classes=self.num_cam).to(imgs.device)
-            overall_feat = get_joint_feat(feat, init_prob, action, self.aggregation)
-            overall_feat_s.append(overall_feat)
-            selection_prob_s.append(action)
-        overall_feat_s = torch.stack(overall_feat_s, dim=1)
-        selection_res_s = (None, None, torch.stack(selection_prob_s, dim=1))
-        overall_result_s = self.get_output(overall_feat_s.flatten(0, 1))
-        if isinstance(overall_result_s, tuple):
-            overall_result_s = tuple(result.unflatten(0, [B, N]) for result in overall_result_s)
+
+        # K, B, N
+        combinations = torch.tensor(combinations, dtype=torch.float, device=imgs.device).unsqueeze(1).repeat([1, B, 1])
+
+        # K, B, N, C, H, W
+        overall_feat_s = [aggregate_feat(feat, combinations[k], self.aggregation) for k in range(K)]
+        overall_result_s = [self.get_output(overall_feat_s[k]) for k in range(K)]
+        if isinstance(overall_result_s[0], tuple):
+            overall_result_s = tuple([torch.stack([overall_result_s[k][i] for k in range(K)])
+                                      for i in range(len(overall_result_s[0]))])
         else:
-            overall_result_s = overall_result_s.unflatten(0, [B, N])
-        return overall_result_s, aux_res, selection_res_s
+            overall_result_s = torch.stack(overall_result_s)
+        return overall_result_s, aux_res
+
+
+if __name__ == '__main__':
+    B, N, C, H, W = 2, 7, 512, 16, 16
+    steps = 3
+    feat = torch.randn([B, N, C, H, W], device='cuda')
+
+    candidates = np.eye(N)
+    combinations = np.array(list(itertools.combinations(candidates, steps + 1))).sum(1)
+    K = len(combinations)
+    combinations = torch.from_numpy(combinations).to(feat.device).unsqueeze(0).repeat([B, 1, 1])
+    feat = feat.unsqueeze(1).repeat([1, K, 1, 1, 1, 1])
+
+    overall_feat_s = [aggregate_feat(feat[:, k], combinations[:, k]) for k in range(K)]
+    print((torch.stack(overall_feat_s, dim=1).flatten(0, 1) ==
+           aggregate_feat(feat.flatten(0, 1), combinations.flatten(0, 1))).prod().item())

@@ -49,6 +49,7 @@ if __name__ == '__main__':
     from src.datasets import imgDataset
     from torch.utils.data import DataLoader
     from thop import profile
+    import itertools
 
     dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v2png_ori4', 20)
     dataloader = DataLoader(dataset, 2, False, num_workers=0)
@@ -56,12 +57,15 @@ if __name__ == '__main__':
     model = MVCNN(dataset).cuda()
     init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
     keep_cams[0, 3] = 0
-    model.train()
-    res = model(imgs.cuda(), None, 2, init_prob, 3, keep_cams)
-    # model.eval()
+    # model.train()
+    # res = model(imgs.cuda(), None, 2, init_prob, 3, keep_cams)
+    model.eval()
     # res = model(imgs.cuda(), None, init_prob, override=5)
-    # with torch.no_grad():
-    #     cam_combination_results = model.forward_override_combination(imgs.cuda(), None, 1)
+    B, N, C, H, W = imgs.shape
+    candidates = np.eye(N)
+    combinations = np.array(list(itertools.combinations(candidates, 2))).sum(1)
+    with torch.no_grad():
+        cam_combination_results = model.forward_override_combination(imgs.cuda(), None, 1, combinations)
     # macs, params = profile(model, inputs=(imgs[:, ],))
     #
     # print(f'{macs}')

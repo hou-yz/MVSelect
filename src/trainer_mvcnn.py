@@ -1,3 +1,4 @@
+import itertools
 import random
 import time
 import copy
@@ -9,9 +10,9 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
 from src.utils.meters import AverageMeter
-from src.trainer import BaseTrainer
+from src.trainer import BaseTrainer, find_instance_lvl_strategy
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
-from src.models.mvselect import update_ema_variables, get_eps_thres
+from src.models.mvselect import aggregate_feat, get_eps_thres
 
 
 class ClassifierTrainer(BaseTrainer):
@@ -41,7 +42,7 @@ class ClassifierTrainer(BaseTrainer):
                 loss, (action_sum, return_avg, value_loss) = \
                     self.expand_episode(feat, keep_cams, tgt, eps_thres, (action_sum, return_avg))
             else:
-                overall_feat = feat.mean(dim=1) if self.model.aggregation == 'mean' else feat.max(dim=1)[0]
+                overall_feat = aggregate_feat(feat, aggregation=self.model.aggregation)
                 output = self.model.get_output(overall_feat)
                 loss = F.cross_entropy(output, tgt)
 
@@ -110,24 +111,32 @@ class ClassifierTrainer(BaseTrainer):
 
         return losses / len(dataloader), [correct / (correct + miss) * 100.0, ]
 
-    def test_cam_combination(self, dataloader, init_cam):
+    def test_cam_combination(self, dataloader, combinations):
         self.model.eval()
+        t0 = time.time()
+        K, N = combinations.shape
         loss_s, pred_s, gt_s = [], [], []
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
-            tgt = tgt.unsqueeze(1).repeat([1, N])
+            gt_s.append(tgt)
+            tgt = tgt.unsqueeze(0).repeat([K, 1])
+            # K, B, N
             with torch.no_grad():
-                output, _, _ = self.model.forward_override_combination(imgs.cuda(), None, self.args.down, init_cam)
+                output, _ = self.model.forward_override_combination(imgs.cuda(), None, self.args.down, combinations)
             loss = F.cross_entropy(output.flatten(0, 1), tgt.flatten(0, 1).cuda(), reduction="none")
             pred = torch.argmax(output, -1)
-            loss_s.append(loss.cpu().unflatten(0, [B, N]))
+            loss_s.append(loss.unflatten(0, [K, B]).cpu())
             pred_s.append(pred.cpu())
-            gt_s.append(tgt)
-        loss_s, pred_s, gt_s = torch.cat(loss_s, 0), torch.cat(pred_s, 0), torch.cat(gt_s, 0)
-        tp_s = pred_s == gt_s
+        loss_s, pred_s, gt_s = torch.cat(loss_s, 1), torch.cat(pred_s, 1), torch.cat(gt_s)
+        # K, num_frames
+        tp_s = (pred_s == gt_s[None, :]).float()
         # instance level selection
-        instance_lvl_max_prec = tp_s.max(dim=1)[0].float().mean().item()
+        instance_lvl_strategy = find_instance_lvl_strategy(tp_s, combinations)
+        instance_lvl_oracle = np.take_along_axis(tp_s, instance_lvl_strategy, axis=0).mean(1).numpy()
         # dataset level selection
-        dataset_lvl_prec = tp_s.float().mean(0).numpy()
+        dataset_lvl_prec = tp_s.mean(1).numpy()
 
-        return loss_s.mean(0).numpy(), [instance_lvl_max_prec * 100.0, ], dataset_lvl_prec[:, None] * 100.0
+        print('*************************************')
+        print(f'{int(combinations.sum(1).mean())} steps, '
+              f'oracle average acc {instance_lvl_oracle.mean():.1%} time: {time.time() - t0:.1f}s')
+        return loss_s.mean(1).numpy(), dataset_lvl_prec[:, None] * 100.0, instance_lvl_oracle[:, None] * 100.0

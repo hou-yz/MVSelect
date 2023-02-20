@@ -1,5 +1,6 @@
 import os
 import time
+import itertools
 
 os.environ['OMP_NUM_THREADS'] = '1'
 import argparse
@@ -19,7 +20,7 @@ from src.models.mvcnn import MVCNN
 from src.utils.logger import Logger
 from src.utils.draw_curve import draw_curve
 from src.utils.str2bool import str2bool
-from src.trainer import PerspectiveTrainer
+from src.trainer import PerspectiveTrainer, find_dataset_lvl_strategy
 from src.trainer_mvcnn import ClassifierTrainer
 
 
@@ -67,9 +68,9 @@ def main(args):
         args.select_lr = 2e-5 if args.select_lr is None else args.select_lr
         args.batch_size = 8 if args.batch_size is None else args.batch_size
 
-        train_set = imgDataset(fpath, num_cam, mode='multi', split='train', )
-        val_set = imgDataset(fpath, num_cam, mode='multi', split='train', per_cls_instances=25)
-        test_set = imgDataset(fpath, num_cam, mode='multi', split='test', )
+        train_set = imgDataset(fpath, num_cam, split='train', )
+        val_set = imgDataset(fpath, num_cam, split='train', per_cls_instances=25)
+        test_set = imgDataset(fpath, num_cam, split='test', )
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -110,25 +111,23 @@ def main(args):
                             pin_memory=True, worker_init_fn=seed_worker)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                              pin_memory=True, worker_init_fn=seed_worker)
+    N = train_set.num_cam
 
     # logging
-    if args.resume is None or not args.eval:
-        select_settings = f'steps{args.steps}_entropy{args.beta_entropy}_'
-        lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
-                      f'select{args.select_lr}' if args.steps else ''
-        logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
-                 f'{select_settings if args.steps else ""}' \
-                 f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
-                 f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
-        os.makedirs(logdir, exist_ok=True)
-        copy_tree('src', logdir + '/scripts/src')
-        for script in os.listdir('.'):
-            if script.split('.')[-1] == 'py':
-                dst_file = os.path.join(logdir, 'scripts', os.path.basename(script))
-                shutil.copyfile(script, dst_file)
-        sys.stdout = Logger(os.path.join(logdir, 'log.txt'), )
-    else:
-        logdir = f'logs/{args.dataset}/{args.resume}'
+    select_settings = f'steps{args.steps}_entropy{args.beta_entropy}_'
+    lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
+                  f'select{args.select_lr}' if args.steps else ''
+    logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
+             f'{select_settings if args.steps else ""}' \
+             f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
+             f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
+    os.makedirs(logdir, exist_ok=True)
+    copy_tree('src', logdir + '/scripts/src')
+    for script in os.listdir('.'):
+        if script.split('.')[-1] == 'py':
+            dst_file = os.path.join(logdir, 'scripts', os.path.basename(script))
+            shutil.copyfile(script, dst_file)
+    sys.stdout = Logger(os.path.join(logdir, 'log.txt'), )
     print(logdir)
     print('Settings:')
     print(vars(args))
@@ -185,7 +184,7 @@ def main(args):
         t0 = time.time()
         if args.steps:
             loss_s, prec_s = [], []
-            for init_cam in range(train_set.num_cam):
+            for init_cam in range(N):
                 print(f'init camera {init_cam}: MVSelect')
                 loss, prec = trainer.test(dataloader, init_cam)
                 loss_s.append(loss)
@@ -199,25 +198,6 @@ def main(args):
             print(f'using all cameras:')
             loss, prec = trainer.test(dataloader)
         return loss, prec
-
-    def test_override(dataloader, result_type=('prec',)):
-        loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s = [], [], []
-        t0 = time.time()
-        for init_cam in range(train_set.num_cam):
-            t1 = time.time()
-            print(f'init camera {init_cam}: override')
-            loss, instance_lvl_max_prec, dataset_lvl_prec = trainer.test_cam_combination(dataloader, init_cam)
-            loss_s.append(loss)
-            instance_lvl_max_prec_s.append(instance_lvl_max_prec)
-            dataset_lvl_prec_s.append(dataset_lvl_prec)
-            result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec))
-            print(f'oracle {result_str} \t time: {time.time() - t1:.1f}s')
-        instance_lvl_max_prec_s = np.array(instance_lvl_max_prec_s)
-        result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, instance_lvl_max_prec_s.mean(0)))
-        print('*************************************')
-        print(f'oracle average {result_str} time: {time.time() - t0:.1f}')
-        print('*************************************')
-        return loss_s, instance_lvl_max_prec_s, dataset_lvl_prec_s
 
     # draw curve
     x_epoch = []
@@ -243,52 +223,73 @@ def main(args):
                 test_loss_s.append(test_loss)
                 test_prec_s.append(test_prec[0])
                 draw_curve(os.path.join(logdir, 'learning_curve.jpg'), x_epoch, train_loss_s, test_loss_s,
-                           train_prec_s if args.task == 'mvcnn' else None, test_prec_s)
+                           train_prec_s, test_prec_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
     def log_best2cam_strategy(result_type=('prec',)):
-        val_loss_s, val_oracle_s, val_prec_s = test_override(val_loader, result_type=result_type)
-        test_loss_s, test_oracle_s, test_prec_s = test_override(test_loader, result_type=result_type)
-        val_loss_s, val_prec_s = np.array(val_loss_s), np.array(val_prec_s)
-        test_loss_s, test_prec_s = np.array(test_loss_s), np.array(test_prec_s)
-        test_precs_avg = test_prec_s[~np.eye(train_set.num_cam, dtype=bool)].mean(axis=0)
-        loss_strategy = np.argmin(val_loss_s, axis=0)
-        loss_strategy_precs = test_prec_s[loss_strategy, np.arange(train_set.num_cam)]
-        loss2cam = np.mean(loss_strategy_precs, axis=0)
-        result_strategy = np.argmax(val_prec_s[:, :, 0], axis=0)
-        result_strategy_precs = test_prec_s[result_strategy, np.arange(train_set.num_cam)]
-        result2cam = np.mean(result_strategy_precs, axis=0)
-        theory_strategy = np.argmax(test_prec_s[:, :, 0], axis=0)
-        theory_strategy_precs = test_prec_s[theory_strategy, np.arange(train_set.num_cam)]
-        best2cam = np.mean(theory_strategy_precs, axis=0)
+        candidates = np.eye(N)
+        combinations = np.array(list(itertools.combinations(candidates, 2))).sum(1)
+        combination_indices = np.array(list(itertools.combinations(list(range(N)), 2)))
+        # diagonal: step == 0
+        val_loss_diag, val_prec_diag, _ = trainer.test_cam_combination(val_loader, candidates)
+        test_loss_diag, test_prec_diag, _ = trainer.test_cam_combination(test_loader, candidates)
+        # non-diagonal: step == 1
+        val_loss_s, val_prec_s, val_oracle_s = trainer.test_cam_combination(val_loader, combinations)
+        test_loss_s, test_prec_s, test_oracle_s = trainer.test_cam_combination(test_loader, combinations)
+
+        def combine2mat(diag_terms, non_diag_terms):
+            combined_mat = np.zeros([len(diag_terms), len(diag_terms)] + list(diag_terms.shape[1:]))
+            combined_mat[np.eye(len(diag_terms), dtype=bool)] = diag_terms
+            non_diag_indices = list(itertools.combinations(list(range(len(diag_terms))), 2))
+            for i in range(len(non_diag_indices)):
+                idx = non_diag_indices[i]
+                combined_mat[idx[0], idx[1]] = combined_mat[idx[1], idx[0]] = non_diag_terms[i]
+            return combined_mat
+
+        def find_cam(init_cam, combination_id):
+            cam_tuple = list(combination_indices[combination_id])
+            cam_tuple.remove(init_cam)
+            return cam_tuple[0]
+
+        val_loss_strategy = find_dataset_lvl_strategy(-val_loss_s, combinations)
+        val_metric_strategy = find_dataset_lvl_strategy(val_prec_s[:, 0], combinations)
+        test_metric_strategy = find_dataset_lvl_strategy(test_prec_s[:, 0], combinations)
+
         _, prec = trainer.test(test_loader)
-        np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([val_loss_s, test_loss_s]), '%.2f')
+        np.savetxt(f'{logdir}/losses_val_test.txt', np.concatenate([combine2mat(val_loss_diag, val_loss_s),
+                                                                    combine2mat(test_loss_diag, test_loss_s)]), '%.2f')
         for i in range(len(result_type)):
-            fname = f'{result_type[i]}_{prec[i]:.1f}_Lstrategy{loss2cam[i]:.1f}_Rstrategy{result2cam[i]:.1f}_' \
-                    f'theory{best2cam[i]:.1f}_avg{test_precs_avg[i]:.1f}.txt'
+            fname = f'{result_type[i]}_{prec[i]:.1f}_' \
+                    f'Lstrategy{test_prec_s[val_loss_strategy].mean(0)[i]:.1f}_' \
+                    f'Rstrategy{test_prec_s[val_metric_strategy].mean(0)[i]:.1f}_' \
+                    f'theory{test_prec_s[test_metric_strategy].mean(0)[i]:.1f}_' \
+                    f'avg{test_prec_s.mean(0)[i]:.1f}.txt'
             np.savetxt(f'{logdir}/{fname}',
-                       np.concatenate([val_prec_s[:, :, i], test_prec_s[:, :, i]]), '%.1f',
+                       np.concatenate([combine2mat(val_prec_diag, val_prec_s)[:, :, i],
+                                       combine2mat(test_prec_diag, test_prec_s)[:, :, i]]), '%.1f',
                        header=f'loading checkpoint...\n'
                               f'{logdir}\n'
                               f'val / test',
                        footer=f'\tdataset level: loss strategy\n' +
-                              ' '.join(f'cam {loss_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
-                              ' '.join(f'{loss_strategy_precs[cam, i]:.1f}% |'
-                                       for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'cam {find_cam(cam, val_loss_strategy[cam])} |' for cam in range(N)) + '\n' +
+                              ' '.join(f'{test_prec_s[val_loss_strategy][cam, i]:.1f}% |'
+                                       for cam in range(N)) + '\n' +
                               f'\tdataset level: result strategy\n' +
-                              ' '.join(f'cam {result_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
-                              ' '.join(f'{result_strategy_precs[cam, i]:.1f}% |'
-                                       for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'cam {find_cam(cam, val_metric_strategy[cam])} |' for cam in range(N)) + '\n' +
+                              ' '.join(f'{test_prec_s[val_metric_strategy][cam, i]:.1f}% |'
+                                       for cam in range(N)) + '\n' +
                               f'\tdataset level: theory\n' +
-                              ' '.join(f'cam {theory_strategy[cam]} |' for cam in range(train_set.num_cam)) + '\n' +
-                              ' '.join(f'{theory_strategy_precs[cam, i]:.1f}% |'
-                                       for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'cam {find_cam(cam, test_metric_strategy[cam])} |' for cam in range(N)) + '\n' +
+                              ' '.join(f'{test_prec_s[test_metric_strategy][cam, i]:.1f}% |'
+                                       for cam in range(N)) + '\n' +
                               f'\tinstance level: oracle\n' +
-                              ' '.join(f'----- |' for cam in range(train_set.num_cam)) + '\n' +
+                              ' '.join(f'----- |' for cam in range(N)) + '\n' +
                               ' '.join(f'{test_oracle_s[cam, i]:.1f}% |'
-                                       for cam in range(train_set.num_cam)) + '\n' +
-                              f'2 best cam: loss_strategy {loss2cam[i]:.1f}, result_strategy {result2cam[i]:.1f}, '
-                              f'theory {best2cam[i]:.1f}, oracle {test_oracle_s.mean(0)[i]:.1f}, average {test_precs_avg[i]:.1f}\n'
+                                       for cam in range(N)) + '\n' +
+                              f'2 best cam: loss_strategy {test_prec_s[val_loss_strategy].mean(0)[i]:.1f}, '
+                              f'result_strategy {test_prec_s[val_metric_strategy].mean(0)[i]:.1f}, '
+                              f'theory {test_prec_s[test_metric_strategy].mean(0)[i]:.1f}, '
+                              f'oracle {test_oracle_s.mean(0)[i]:.1f}, average {test_prec_s.mean(0)[i]:.1f}\n'
                               f'all cam: {prec[i]:.1f}')
             with open(f'{logdir}/{fname}', 'r') as fp:
                 if i == 0:
