@@ -19,18 +19,23 @@ class MultiviewBase(nn.Module):
             overall_feat = aggregate_feat(feat, aggregation=self.aggregation)
             selection_res = (None, None, None, None)
         else:
-            init_prob, _, _ = setup_args(imgs, init_prob)
-            log_probs, values, actions, entropies = [], [], [], []
-            for _ in range(steps):
-                overall_feat, (log_prob, state_value, action, entropy) = self.select_module(feat, init_prob, keep_cams)
-                init_prob += action
-                log_probs.append(log_prob)
-                values.append(state_value)
-                actions.append(action)
-                entropies.append(entropy)
-            selection_res = (log_probs, values, actions, entropies)
+            overall_feat, selection_res = self.do_steps(feat, init_prob, steps, keep_cams)
         overall_res = self.get_output(overall_feat, visualize)
         return overall_res, aux_res, selection_res
+
+    def do_steps(self, feat, init_prob, steps, keep_cams):
+        assert steps > 0
+        init_prob, _, _ = setup_args(feat, init_prob)
+        log_probs, values, actions, entropies = [], [], [], []
+        for _ in range(steps):
+            overall_feat, (log_prob, state_value, action, entropy) = self.select_module(feat, init_prob, keep_cams)
+            init_prob += action
+            log_probs.append(log_prob)
+            values.append(state_value)
+            actions.append(action)
+            entropies.append(entropy)
+        selection_res = (log_probs, values, actions, entropies)
+        return overall_feat, selection_res
 
     def get_feat(self, imgs, M, down=1, visualize=False):
         raise NotImplementedError

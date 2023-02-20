@@ -180,25 +180,6 @@ def main(args):
     else:
         trainer = PerspectiveTrainer(model, logdir, args)
 
-    def test_select(dataloader, result_type=('prec',)):
-        t0 = time.time()
-        if args.steps:
-            loss_s, prec_s = [], []
-            for init_cam in range(N):
-                print(f'init camera {init_cam}: MVSelect')
-                loss, prec = trainer.test(dataloader, init_cam)
-                loss_s.append(loss)
-                prec_s.append(prec)
-            loss, prec = np.average(loss_s), np.average(np.array(prec_s), axis=0)
-            result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(result_type, prec))
-            print('*************************************')
-            print(f'MVSelect average {result_str} time: {time.time() - t0:.1f}')
-            print('*************************************')
-        else:
-            print(f'using all cameras:')
-            loss, prec = trainer.test(dataloader)
-        return loss, prec
-
     # draw curve
     x_epoch = []
     train_loss_s = []
@@ -214,7 +195,7 @@ def main(args):
             train_loss, train_prec = trainer.train(epoch, train_loader, optimizer, scheduler)
             if epoch % max(args.epochs // 10, 1) == 0:
                 print('Testing...')
-                test_loss, test_prec = test_select(test_loader, result_type=result_type)
+                test_loss, test_prec = trainer.test(test_loader, torch.eye(N) if args.steps else None)
 
                 # draw & save
                 x_epoch.append(epoch)
@@ -226,7 +207,7 @@ def main(args):
                            train_prec_s, test_prec_s)
                 torch.save(model.state_dict(), os.path.join(logdir, 'model.pth'))
 
-    def log_best2cam_strategy(result_type=('prec',)):
+    def log_best2cam_strategy(result_type=('prec',), max_steps=4):
         candidates = np.eye(N)
         combinations = np.array(list(itertools.combinations(candidates, 2))).sum(1)
         combination_indices = np.array(list(itertools.combinations(list(range(N)), 2)))
@@ -236,6 +217,8 @@ def main(args):
         # non-diagonal: step == 1
         val_loss_s, val_prec_s, val_oracle_s = trainer.test_cam_combination(val_loader, combinations)
         test_loss_s, test_prec_s, test_oracle_s = trainer.test_cam_combination(test_loader, combinations)
+        for i in range(2, max_steps):
+            trainer.test_cam_combination(test_loader, np.array(list(itertools.combinations(candidates, i + 1))).sum(1))
 
         def combine2mat(diag_terms, non_diag_terms):
             combined_mat = np.zeros([len(diag_terms), len(diag_terms)] + list(diag_terms.shape[1:]))

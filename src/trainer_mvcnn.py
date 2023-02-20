@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
 from src.utils.meters import AverageMeter
-from src.trainer import BaseTrainer, find_instance_lvl_strategy
+from src.trainer import BaseTrainer, find_instance_lvl_strategy, find_dataset_lvl_strategy
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
 from src.models.mvselect import aggregate_feat, get_eps_thres
 
@@ -52,7 +52,7 @@ class ClassifierTrainer(BaseTrainer):
 
             optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            optimizer.do_steps()
 
             losses += loss.item()
 
@@ -81,35 +81,55 @@ class ClassifierTrainer(BaseTrainer):
     def test(self, dataloader, init_cam=None):
         t0 = time.time()
         self.model.eval()
-        losses, correct, miss = 0, 0, 1e-8
-        action_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
+        K = len(init_cam) if init_cam is not None else 1
+        losses, correct, miss = torch.zeros([K]), torch.zeros([K]), torch.zeros([K]) + 1e-8
+        action_sum = torch.zeros([K, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
             imgs, tgt = imgs.cuda(), tgt.cuda()
-            # with autocast():
+            outputs, actions = [], []
             with torch.no_grad():
-                output, _, (log_probs, values, actions, entropies) = self.model(imgs, None, self.args.down, init_cam,
-                                                                                self.args.steps)
-            loss = F.cross_entropy(output, tgt)
+                if self.args.steps == 0 or init_cam is None:
+                    output, _, (_, _, action, _) = self.model(imgs, None, self.args.down)
+                    outputs.append(output)
+                    actions.append(action)
+                else:
+                    feat, _ = self.model.get_feat(imgs, None, self.args.down)
+                    # K, B, N
+                    for k in range(K):
+                        overall_feat, (_, _, action, _) = \
+                            self.model.do_steps(feat, init_cam[k].repeat([B, 1]), self.args.steps, keep_cams)
+                        output = self.model.get_output(overall_feat)
+                        outputs.append(output)
+                        actions.append(action)
+
+            for k in range(K):
+                loss = F.cross_entropy(outputs[k], tgt)
+                if init_cam is not None:
+                    # record actions
+                    action_sum[k] += torch.cat(actions[k]).sum(dim=0)
+                losses[k] += loss.item()
+
+                pred = torch.argmax(outputs[k], 1)
+                correct[k] += (pred == tgt).sum().item()
+                miss[k] += B - (pred == tgt).sum().item()
+
+        for k in range(K):
             if init_cam is not None:
-                # record actions
-                action_sum += torch.cat(actions).sum(dim=0)
+                print(f'init camera {init_cam[k].nonzero()[0].item()}: MVSelect')
+                idx = action_sum[k].nonzero().cpu()[:, 0]
+                print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
+                               zip(idx, F.normalize(action_sum[k], p=1, dim=0).cpu()[idx])))
 
-            losses += loss.item()
-
-            pred = torch.argmax(output, 1)
-            correct += (pred == tgt).sum().item()
-            miss += B - (pred == tgt).sum().item()
+            print(f'Test, loss: {losses[k] / len(dataloader):.3f}, '
+                  f'prec: {100. * correct[k] / (correct[k] + miss[k]):.2%}' +
+                  ('' if init_cam is not None else f'time: {time.time() - t0:.1f}s'))
 
         if init_cam is not None:
-            idx = action_sum.nonzero().cpu()[:, 0]
-            print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                           zip(idx, F.normalize(action_sum, p=1, dim=0).cpu()[idx])))
-
-        print(f'Test, loss: {losses / len(dataloader):.3f}, prec: {100. * correct / (correct + miss):.2f}%, '
-              f'time: {time.time() - t0:.1f}s')
-
-        return losses / len(dataloader), [correct / (correct + miss) * 100.0, ]
+            print('*************************************')
+            print(f'MVSelect average prec {correct.sum() / (correct + miss).sum():.2%}, time: {time.time() - t0:.1f}')
+            print('*************************************')
+        return losses.mean() / len(dataloader), [correct.sum() / (correct + miss).sum() * 100.0, ]
 
     def test_cam_combination(self, dataloader, combinations):
         self.model.eval()
@@ -135,8 +155,9 @@ class ClassifierTrainer(BaseTrainer):
         instance_lvl_oracle = np.take_along_axis(tp_s, instance_lvl_strategy, axis=0).mean(1).numpy()
         # dataset level selection
         dataset_lvl_prec = tp_s.mean(1).numpy()
-
-        print('*************************************')
+        dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_prec, combinations)
+        dataset_lvl_best_prec = dataset_lvl_prec[dataset_lvl_strategy]
         print(f'{int(combinations.sum(1).mean())} steps, '
-              f'oracle average acc {instance_lvl_oracle.mean():.1%} time: {time.time() - t0:.1f}s')
+              f'dataset lvl best acc {dataset_lvl_best_prec.mean():.1%}, '
+              f'instance lvl oracle {instance_lvl_oracle.mean():.1%}, time: {time.time() - t0:.1f}s')
         return loss_s.mean(1).numpy(), dataset_lvl_prec[:, None] * 100.0, instance_lvl_oracle[:, None] * 100.0

@@ -85,15 +85,6 @@ class BaseTrainer(object):
     def task_loss_reward(self, overall_feat, tgt, step):
         raise NotImplementedError
 
-    def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=100):
-        raise NotImplementedError
-
-    def test(self, dataloader, init_cam=None):
-        raise NotImplementedError
-
-    def test_cam_combination(self, dataloader, init_cam):
-        raise NotImplementedError
-
 
 class PerspectiveTrainer(BaseTrainer):
     def __init__(self, model, logdir, args, ):
@@ -161,7 +152,7 @@ class PerspectiveTrainer(BaseTrainer):
 
             optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            optimizer.do_steps()
 
             losses += loss.item()
 
@@ -190,63 +181,87 @@ class PerspectiveTrainer(BaseTrainer):
     def test(self, dataloader, init_cam=None):
         t0 = time.time()
         self.model.eval()
-        losses = 0
-        res_list = []
-        action_sum = torch.zeros([dataloader.dataset.num_cam]).cuda()
+        K = len(init_cam) if init_cam is not None else 1
+        losses = torch.zeros([K])
+        modas, modps, precs, recalls = torch.zeros([K]), torch.zeros([K]), torch.zeros([K]), torch.zeros([K])
+        res_list = [[] for _ in range(K)]
+        action_sum = torch.zeros([K, dataloader.dataset.num_cam]).cuda()
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs_gt['heatmap'].shape[:2]
-            # with autocast():
+            world_heatmaps, world_offsets, actions = [], [], []
             with torch.no_grad():
-                (world_heatmap, world_offset), _, (log_probs, values, actions, entropies) = \
-                    self.model(imgs.cuda(), affine_mats, self.args.down, init_cam, self.args.steps)
-            loss = focal_loss(world_heatmap, world_gt['heatmap'])
-            if self.args.use_mse:
-                loss = F.mse_loss(world_heatmap, world_gt['heatmap'].to(world_heatmap.device))
+                if self.args.steps == 0 or init_cam is None:
+                    (world_heatmap, world_offset), _, (_, _, action, _) = \
+                        self.model(imgs.cuda(), affine_mats, self.args.down)
+                    world_heatmaps.append(world_heatmap)
+                    world_offsets.append(world_offset)
+                    actions.append(action)
+                else:
+                    feat, _ = self.model.get_feat(imgs.cuda(), affine_mats, self.args.down)
+                    # K, B, N
+                    for k in range(K):
+                        overall_feat, (_, _, action, _) = \
+                            self.model.do_steps(feat, init_cam[k].repeat([B, 1]), self.args.steps, keep_cams)
+                        world_heatmap, world_offset = self.model.get_output(overall_feat)
+                        world_heatmaps.append(world_heatmap)
+                        world_offsets.append(world_offset)
+                        actions.append(action)
+            for k in range(K):
+                loss = focal_loss(world_heatmaps[k], world_gt['heatmap'])
+                if self.args.use_mse:
+                    loss = F.mse_loss(world_heatmaps[k], world_gt['heatmap'].cuda())
+                if init_cam is not None:
+                    # record actions
+                    action_sum[k] += torch.cat(actions[k]).sum(dim=0)
+                losses[k] += loss.item()
+
+                xys = mvdet_decode(torch.sigmoid(world_heatmaps[k]), world_offsets[k],
+                                   reduce=dataloader.dataset.world_reduce).cpu()
+                grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
+                if dataloader.dataset.base.indexing == 'xy':
+                    positions = grid_xy
+                else:
+                    positions = grid_xy[:, :, [1, 0]]
+                for b in range(B):
+                    ids = scores[b].squeeze() > self.args.cls_thres
+                    pos, s = positions[b, ids], scores[b, ids, 0]
+                    ids, count = nms(pos, s, 20, np.inf)
+                    res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
+                    res_list[k].append(res)
+
+        for k in range(K):
             if init_cam is not None:
-                # record actions
-                action_sum += torch.cat(actions).sum(dim=0)
+                print(f'init camera {init_cam[k].nonzero()[0].item()}: MVSelect')
+                idx = action_sum[k].nonzero().cpu()[:, 0]
+                print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
+                               zip(idx, F.normalize(action_sum[k], p=1, dim=0).cpu()[idx])))
 
-            losses += loss.item()
-
-            if self.args.eval_init_cam and init_cam is not None:
-                world_heatmap *= dataloader.dataset.Rworld_coverage[init_cam].cuda()
-            xys = mvdet_decode(torch.sigmoid(world_heatmap), world_offset, reduce=dataloader.dataset.world_reduce).cpu()
-            grid_xy, scores = xys[:, :, :2], xys[:, :, 2:3]
-            if dataloader.dataset.base.indexing == 'xy':
-                positions = grid_xy
-            else:
-                positions = grid_xy[:, :, [1, 0]]
-            for b in range(B):
-                ids = scores[b].squeeze() > self.args.cls_thres
-                pos, s = positions[b, ids], scores[b, ids, 0]
-                ids, count = nms(pos, s, 20, np.inf)
-                res = torch.cat([torch.ones([count, 1]) * frame[b], pos[ids[:count]]], dim=1)
-                res_list.append(res)
+            res = torch.cat(res_list[k], dim=0).numpy() if res_list[k] else np.empty([0, 3])
+            np.savetxt(f'{self.logdir}/test.txt', res, '%d')
+            gt_fname = f'{dataloader.dataset.gt_fname}_{init_cam}.txt' \
+                if self.args.eval_init_cam and init_cam is not None else f'{dataloader.dataset.gt_fname}.txt'
+            moda, modp, precision, recall = evaluate(f'{self.logdir}/test.txt',
+                                                     gt_fname,
+                                                     dataloader.dataset.base.__name__,
+                                                     dataloader.dataset.frames)
+            print(f'Test, loss: {losses[k] / len(dataloader):.6f}, moda: {moda:.1f}%, modp: {modp:.1f}%, '
+                  f'prec: {precision:.1f}%, recall: {recall:.1f}%' +
+                  ('' if init_cam is not None else f'time: {time.time() - t0:.1f}s'))
+            modas[k], modps[k], precs[k], recalls[k] = moda, modp, precision, recall
 
         if init_cam is not None:
-            idx = action_sum.nonzero().cpu()[:, 0]
-            print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
-                           zip(idx, F.normalize(action_sum, p=1, dim=0).cpu()[idx])))
-
-        res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
-        np.savetxt(f'{self.logdir}/test.txt', res_list, '%d')
-        gt_fname = f'{dataloader.dataset.gt_fname}_{init_cam}.txt' \
-            if self.args.eval_init_cam and init_cam is not None else f'{dataloader.dataset.gt_fname}.txt'
-        moda, modp, precision, recall = evaluate(f'{self.logdir}/test.txt',
-                                                 gt_fname,
-                                                 dataloader.dataset.base.__name__,
-                                                 dataloader.dataset.frames)
-        print(f'Test, loss: {losses / len(dataloader):.6f}, moda: {moda:.1f}%, modp: {modp:.1f}%, '
-              f'prec: {precision:.1f}%, recall: {recall:.1f}%, time: {time.time() - t0:.1f}s')
-
-        return losses / len(dataloader), [moda, modp, precision, recall, ]
+            print('*************************************')
+            print(f'MVSelect average moda {modas.mean():.1f}%, modp {modps.mean():.1f}%, '
+                  f'prec {precs.mean():.1f}%, recall {recalls.mean():.1f}%, time: {time.time() - t0:.1f}')
+            print('*************************************')
+        return losses.mean() / len(dataloader), [modas.mean(), modps.mean(), precs.mean(), recalls.mean(), ]
 
     def test_cam_combination(self, dataloader, combinations):
         self.model.eval()
         t0 = time.time()
         K, N = combinations.shape
         loss_s, result_s = [], [[] for _ in range(K)]
-        dataset_lvl_selection_metrics, stats_s = [], []
+        dataset_lvl_metrics, stats_s = [], []
 
         for batch_idx, (imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams) in enumerate(dataloader):
             B, N = imgs.shape[:2]
@@ -281,9 +296,9 @@ class PerspectiveTrainer(BaseTrainer):
         for k in range(K):
             moda, modp, prec, recall, stats = evaluateDetection_py(result_s[k], f'{dataloader.dataset.gt_fname}.txt',
                                                                    frames=dataloader.dataset.frames)
-            dataset_lvl_selection_metrics.append([moda, modp, prec, recall])
+            dataset_lvl_metrics.append([moda, modp, prec, recall])
             stats_s.append(stats)
-        dataset_lvl_selection_metrics = np.array(dataset_lvl_selection_metrics)
+        dataset_lvl_metrics = np.array(dataset_lvl_metrics)
         # K, num_frames
         tp_s = np.array([stats_s[k][0] for k in range(K)])
         instance_lvl_strategy = find_instance_lvl_strategy(tp_s, combinations)
@@ -299,11 +314,12 @@ class PerspectiveTrainer(BaseTrainer):
                                                                frames=dataloader.dataset.frames)
             instance_lvl_oracle[init_cam] = [moda, modp, prec, recall]
         instance_lvl_oracle = np.array(instance_lvl_oracle)
-        result_str = ''.join('{}: {:.1f}%, '.format(r, p) for r, p in zip(['moda', 'modp', 'prec', 'recall'],
-                                                                          instance_lvl_oracle.mean(0)))
-        print('*************************************')
-        print(f'{int(combinations.sum(1).mean())} steps, oracle average {result_str} time: {time.time() - t0:.1f}s')
-        return loss_s.mean(1), dataset_lvl_selection_metrics, instance_lvl_oracle
+        dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_metrics[:, 0], combinations)
+        dataset_lvl_best_prec = dataset_lvl_metrics[dataset_lvl_strategy, 0]
+        print(f'{int(combinations.sum(1).mean())} steps, '
+              f'dataset lvl best moda {dataset_lvl_best_prec.mean():.1f}%, '
+              f'instance lvl oracle {instance_lvl_oracle.mean(0)[0]:.1f}%, time: {time.time() - t0:.1f}s')
+        return loss_s.mean(1), dataset_lvl_metrics, instance_lvl_oracle
 
 
 def find_instance_lvl_strategy(rewards, combinations):
