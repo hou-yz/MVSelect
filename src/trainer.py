@@ -246,7 +246,7 @@ class PerspectiveTrainer(BaseTrainer):
                                                      dataloader.dataset.frames)
             print(f'Test, loss: {losses[k] / len(dataloader):.6f}, moda: {moda:.1f}%, modp: {modp:.1f}%, '
                   f'prec: {precision:.1f}%, recall: {recall:.1f}%' +
-                  ('' if init_cam is not None else f'time: {time.time() - t0:.1f}s'))
+                  ('' if init_cam is not None else f', time: {time.time() - t0:.1f}s'))
             modas[k], modps[k], precs[k], recalls[k] = moda, modp, precision, recall
 
         if init_cam is not None:
@@ -256,9 +256,11 @@ class PerspectiveTrainer(BaseTrainer):
             print('*************************************')
         return losses.mean() / len(dataloader), [modas.mean(), modps.mean(), precs.mean(), recalls.mean(), ]
 
-    def test_cam_combination(self, dataloader, combinations):
+    def test_cam_combination(self, dataloader, step=0):
         self.model.eval()
         t0 = time.time()
+        candidates = np.eye(dataloader.dataset.num_cam)
+        combinations = np.array(list(itertools.combinations(candidates, step + 1))).sum(1)
         K, N = combinations.shape
         loss_s, result_s = [], [[] for _ in range(K)]
         dataset_lvl_metrics, stats_s = [], []
@@ -316,10 +318,10 @@ class PerspectiveTrainer(BaseTrainer):
         instance_lvl_oracle = np.array(instance_lvl_oracle)
         dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_metrics[:, 0], combinations)
         dataset_lvl_best_prec = dataset_lvl_metrics[dataset_lvl_strategy, 0]
-        print(f'{int(combinations.sum(1).mean())} steps, '
-              f'dataset lvl best moda {dataset_lvl_best_prec.mean():.1f}%, '
-              f'instance lvl oracle {instance_lvl_oracle.mean(0)[0]:.1f}%, time: {time.time() - t0:.1f}s')
-        return loss_s.mean(1), dataset_lvl_metrics, instance_lvl_oracle
+        oracle_info = f'{step} steps, dataset lvl best moda {dataset_lvl_best_prec.mean():.1f}%, ' \
+                      f'instance lvl oracle {instance_lvl_oracle.mean(0)[0]:.1f}%, time: {time.time() - t0:.1f}s'
+        print(oracle_info)
+        return loss_s.mean(1), dataset_lvl_metrics, instance_lvl_oracle, oracle_info
 
 
 def find_instance_lvl_strategy(rewards, combinations):

@@ -82,7 +82,7 @@ def main(args):
         args.task = 'mvdet'
         result_type = ['moda', 'modp', 'prec', 'recall']
         args.lr = 5e-4 if args.lr is None else args.lr
-        args.select_lr = 2e-5 if args.select_lr is None else args.select_lr
+        args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
         args.batch_size = 1 if args.batch_size is None else args.batch_size
 
         train_set = frameDataset(base, split='trainval', world_reduce=args.world_reduce,
@@ -211,14 +211,16 @@ def main(args):
         candidates = np.eye(N)
         combinations = np.array(list(itertools.combinations(candidates, 2))).sum(1)
         combination_indices = np.array(list(itertools.combinations(list(range(N)), 2)))
+        info_str = {}
         # diagonal: step == 0
-        val_loss_diag, val_prec_diag, _ = trainer.test_cam_combination(val_loader, candidates)
-        test_loss_diag, test_prec_diag, _ = trainer.test_cam_combination(test_loader, candidates)
+        val_loss_diag, val_prec_diag, _, _ = trainer.test_cam_combination(val_loader, 0)
+        test_loss_diag, test_prec_diag, _, info_str[0] = trainer.test_cam_combination(test_loader, 0)
         # non-diagonal: step == 1
-        val_loss_s, val_prec_s, val_oracle_s = trainer.test_cam_combination(val_loader, combinations)
-        test_loss_s, test_prec_s, test_oracle_s = trainer.test_cam_combination(test_loader, combinations)
+        val_loss_s, val_prec_s, val_oracle_s, _ = trainer.test_cam_combination(val_loader, 1)
+        test_loss_s, test_prec_s, test_oracle_s, info_str[1] = trainer.test_cam_combination(test_loader, 1)
         for i in range(2, max_steps):
-            trainer.test_cam_combination(test_loader, np.array(list(itertools.combinations(candidates, i + 1))).sum(1))
+            _, _, _, info_str[i] = trainer.test_cam_combination(test_loader, i)
+        info_str = '\n'.join(info_str.values())
 
         def combine2mat(diag_terms, non_diag_terms):
             combined_mat = np.zeros([len(diag_terms), len(diag_terms)] + list(diag_terms.shape[1:]))
@@ -253,7 +255,7 @@ def main(args):
                        header=f'loading checkpoint...\n'
                               f'{logdir}\n'
                               f'val / test',
-                       footer=f'\tdataset level: loss strategy\n' +
+                       footer=(f'\n{info_str}\n\n' if i == 0 else '') + f'\tdataset level: loss strategy\n' +
                               ' '.join(f'cam {find_cam(cam, val_loss_strategy[cam])} |' for cam in range(N)) + '\n' +
                               ' '.join(f'{test_prec_s[val_loss_strategy][cam, i]:.1f}% |'
                                        for cam in range(N)) + '\n' +

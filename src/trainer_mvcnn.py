@@ -121,9 +121,8 @@ class ClassifierTrainer(BaseTrainer):
                 print(' '.join('cam {} {:.2f} |'.format(cam, freq) for cam, freq in
                                zip(idx, F.normalize(action_sum[k], p=1, dim=0).cpu()[idx])))
 
-            print(f'Test, loss: {losses[k] / len(dataloader):.3f}, '
-                  f'prec: {100. * correct[k] / (correct[k] + miss[k]):.2%}' +
-                  ('' if init_cam is not None else f'time: {time.time() - t0:.1f}s'))
+            print(f'Test, loss: {losses[k] / len(dataloader):.3f}, prec: {correct[k] / (correct[k] + miss[k]):.2%}' +
+                  ('' if init_cam is not None else f', time: {time.time() - t0:.1f}s'))
 
         if init_cam is not None:
             print('*************************************')
@@ -131,9 +130,11 @@ class ClassifierTrainer(BaseTrainer):
             print('*************************************')
         return losses.mean() / len(dataloader), [correct.sum() / (correct + miss).sum() * 100.0, ]
 
-    def test_cam_combination(self, dataloader, combinations):
+    def test_cam_combination(self, dataloader, step=0):
         self.model.eval()
         t0 = time.time()
+        candidates = np.eye(dataloader.dataset.num_cam)
+        combinations = np.array(list(itertools.combinations(candidates, step + 1))).sum(1)
         K, N = combinations.shape
         loss_s, pred_s, gt_s = [], [], []
         for batch_idx, (imgs, tgt, keep_cams) in enumerate(dataloader):
@@ -152,12 +153,12 @@ class ClassifierTrainer(BaseTrainer):
         tp_s = (pred_s == gt_s[None, :]).float()
         # instance level selection
         instance_lvl_strategy = find_instance_lvl_strategy(tp_s, combinations)
-        instance_lvl_oracle = np.take_along_axis(tp_s, instance_lvl_strategy, axis=0).mean(1).numpy()
+        instance_lvl_oracle = np.take_along_axis(tp_s, instance_lvl_strategy, axis=0).mean(1).numpy()[:, None]
         # dataset level selection
-        dataset_lvl_prec = tp_s.mean(1).numpy()
+        dataset_lvl_prec = tp_s.mean(1).numpy()[:, None]
         dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_prec, combinations)
         dataset_lvl_best_prec = dataset_lvl_prec[dataset_lvl_strategy]
-        print(f'{int(combinations.sum(1).mean())} steps, '
-              f'dataset lvl best acc {dataset_lvl_best_prec.mean():.1%}, '
-              f'instance lvl oracle {instance_lvl_oracle.mean():.1%}, time: {time.time() - t0:.1f}s')
-        return loss_s.mean(1).numpy(), dataset_lvl_prec[:, None] * 100.0, instance_lvl_oracle[:, None] * 100.0
+        oracle_info = f'{step} steps, dataset lvl best acc {dataset_lvl_best_prec.mean():.1%}, ' \
+                      f'instance lvl oracle {instance_lvl_oracle.mean():.1%}, time: {time.time() - t0:.1f}s'
+        print(oracle_info)
+        return loss_s.mean(1).numpy(), dataset_lvl_prec * 100.0, instance_lvl_oracle * 100.0, oracle_info
