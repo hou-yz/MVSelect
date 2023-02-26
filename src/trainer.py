@@ -15,12 +15,14 @@ from src.utils.decode import ctdet_decode, mvdet_decode
 from src.utils.nms import nms
 from src.utils.meters import AverageMeter
 from src.utils.image_utils import add_heatmap_to_image, img_color_denormalize
-from src.models.mvselect import aggregate_feat, get_eps_thres
+from src.models.mvselect import aggregate_feat, get_eps_thres, update_ema_variables
 
 
 class BaseTrainer(object):
     def __init__(self, model, logdir, args, ):
         self.model = model
+        self.target_model = copy.deepcopy(model.select_module)
+        self.target_model.eval()
         self.args = args
         self.logdir = logdir
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
@@ -40,7 +42,8 @@ class BaseTrainer(object):
         action_sum, return_avg = misc
         # consider all cameras as initial one
         for init_cam in range(N):
-            log_probs, values, actions, entropies, rewards, task_loss_s = [], [], [], [], [], []
+            log_probs, values, actions, entropies, rewards = [], [], [], [], []
+            task_loss_s, value_loss_s = [], []
             # get result from using initial camera feature
             init_prob = F.one_hot(torch.tensor(init_cam).repeat(B), num_classes=N).cuda()
 
@@ -48,22 +51,28 @@ class BaseTrainer(object):
             for i in range(self.args.steps):
                 task_loss, reward, done, (log_prob, value, action, entropy) = \
                     self.rollout(i, (feat, init_prob, keep_cams), tgt, eps_thres)
+                # TD update
+                with torch.no_grad():
+                    _, (_, next_value, _, _) = self.target_model(feat, init_prob + action, keep_cams)
+                    next_value = next_value.max(dim=1)[0] * (1 - done)
                 # record state & transitions
                 log_probs.append(log_prob)
-                # values.append(value_i[:, 0])
                 values.append((value * action).sum(1))
                 actions.append(action)
                 entropies.append(entropy)
                 rewards.append(reward)
+                # loss
                 task_loss_s.append(task_loss)
+                value_loss = F.smooth_l1_loss((value * action).sum(1), reward + self.args.gamma * next_value)
+                value_loss_s.append(value_loss)
                 # stats
                 action_sum += action.detach().sum(dim=0)
                 # update the init_prob
                 init_prob += action
 
-            log_probs, values, actions, entropies, rewards, task_loss_s = \
-                torch.stack(log_probs), torch.stack(values), torch.stack(actions), \
-                    torch.stack(entropies), torch.stack(rewards), torch.stack(task_loss_s)
+            log_probs, values, actions, entropies, rewards = torch.stack(log_probs), torch.stack(values), \
+                torch.stack(actions), torch.stack(entropies), torch.stack(rewards)
+            task_loss_s, value_loss_s = torch.stack(task_loss_s), torch.stack(value_loss_s)
             # calculate returns for each step in episode
             R = torch.zeros([B]).cuda()
             returns = torch.empty([self.args.steps, B]).cuda().float()
@@ -72,14 +81,16 @@ class BaseTrainer(object):
                 returns[i] = R
             return_avg = returns.mean(1) if return_avg is None else returns.mean(1) * 0.05 + return_avg * 0.95
             # policy & value loss
-            value_loss = F.smooth_l1_loss(values, returns)
+            value_loss = value_loss_s.mean()
+            # value_loss = F.smooth_l1_loss(values, returns)
             # policy_loss = (-log_probs * (returns - values.detach())).mean()
             # task loss
-            task_loss = task_loss_s.mean()
+            task_loss = task_loss_s[-1]
             # loss.append(value_loss + policy_loss + task_loss -
             #             entropies.mean() * self.args.beta_entropy * eps_thres)
             loss.append(value_loss + task_loss)
         loss = torch.stack(loss).mean()
+        update_ema_variables(self.model.select_module, self.target_model)
         return loss, (action_sum, return_avg, value_loss)
 
     def task_loss_reward(self, overall_feat, tgt, step):
@@ -318,7 +329,8 @@ class PerspectiveTrainer(BaseTrainer):
         instance_lvl_oracle = np.array(instance_lvl_oracle)
         dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_metrics[:, 0], combinations)
         dataset_lvl_best_prec = dataset_lvl_metrics[dataset_lvl_strategy, 0]
-        oracle_info = f'{step} steps, dataset lvl best moda {dataset_lvl_best_prec.mean():.1f}%, ' \
+        oracle_info = f'{step} steps, averave moda {dataset_lvl_metrics[:, 0].mean():.1f}%, ' \
+                      f'dataset lvl best {dataset_lvl_best_prec.mean():.1f}%, ' \
                       f'instance lvl oracle {instance_lvl_oracle.mean(0)[0]:.1f}%, time: {time.time() - t0:.1f}s'
         print(oracle_info)
         return loss_s.mean(1), dataset_lvl_metrics, instance_lvl_oracle, oracle_info

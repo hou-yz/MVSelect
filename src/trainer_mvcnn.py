@@ -158,7 +158,8 @@ class ClassifierTrainer(BaseTrainer):
         dataset_lvl_prec = tp_s.mean(1).numpy()[:, None]
         dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_prec, combinations)
         dataset_lvl_best_prec = dataset_lvl_prec[dataset_lvl_strategy]
-        oracle_info = f'{step} steps, dataset lvl best acc {dataset_lvl_best_prec.mean():.1%}, ' \
+        oracle_info = f'{step} steps, averave acc {dataset_lvl_prec.mean():.1%}, ' \
+                      f'dataset lvl best {dataset_lvl_best_prec.mean():.1%}, ' \
                       f'instance lvl oracle {instance_lvl_oracle.mean():.1%}, time: {time.time() - t0:.1f}s'
         print(oracle_info)
         return loss_s.mean(1).numpy(), dataset_lvl_prec * 100.0, instance_lvl_oracle * 100.0, oracle_info
