@@ -60,6 +60,7 @@ def aggregate_feat(feat, selection=None, aggregation='mean'):
     if selection is None:
         overall_feat = feat.mean(dim=1) if aggregation == 'mean' else feat.max(dim=1)[0]
     else:
+        selection = selection.bool()
         overall_feat = feat * selection[:, :, None, None, None]
         if aggregation == 'mean':
             overall_feat = overall_feat.sum(dim=1) / (selection.sum(dim=1).view(-1, 1, 1, 1) + 1e-8)
@@ -81,7 +82,6 @@ class CamSelect(nn.Module):
         else:
             raise Exception
         self.feat_branch = nn.Sequential(nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, padding), nn.ReLU(), )
-        # self.register_buffer('cam_emb', create_pos_embedding(num_cam, hidden_dim))
         self.cam_emb = nn.Parameter(F.normalize(torch.randn([num_cam, hidden_dim]), p=2, dim=1))
         self.emb_branch = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), )
         self.action_head = nn.Linear(hidden_dim, num_cam)
@@ -90,8 +90,6 @@ class CamSelect(nn.Module):
         self.value_head = nn.Linear(hidden_dim, num_cam)
         self.value_head.weight.data.fill_(0)
         self.value_head.bias.data.fill_(0)
-        # self.emb_action = nn.Parameter(torch.zeros([num_cam, num_cam]))
-        # self.emb_value = nn.Parameter(torch.zeros([num_cam, 1]))
 
     def forward(self, feat, init_prob, keep_cams=None, eps_thres=0.0):
         B, N, C, H, W = feat.shape
@@ -106,9 +104,6 @@ class CamSelect(nn.Module):
         # entropy = -(F.log_softmax(action_logit, dim=-1) * action_prob).sum(1)
         # state_value = self.value_head(cam_emb + cam_feat)
 
-        # action_prob = F.softmax(init_prob.float() @ self.emb_action, dim=-1) * cam_candidate
-        # state_value = init_prob.float() @ self.emb_value
-
         # if self.training:
         #     m = Categorical(action_prob)
         #     action = m.sample()
@@ -120,10 +115,11 @@ class CamSelect(nn.Module):
         # DQN
         action_value = self.value_head(cam_emb + cam_feat)
         if random.random() > eps_thres:
-            action = torch.argmax(action_value, dim=-1)
+            action = torch.argmax(action_value + (cam_candidate.float() - 1) * 1e3, dim=-1)
         else:
-            m = Categorical(F.normalize(cam_candidate.float(), p=1, dim=1))
-            action = m.sample()
+            # m = Categorical(F.normalize(cam_candidate.float(), p=1, dim=1))
+            # action = m.sample()
+            action = torch.randint(N, [B], device=feat.device)
 
         action = F.one_hot(action, num_classes=N).bool()
         overall_feat = aggregate_feat(feat, init_prob + action, self.aggregation)
