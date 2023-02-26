@@ -65,7 +65,7 @@ def main(args):
         args.task = 'mvcnn'
         result_type = ['prec']
         args.lr = 5e-5 if args.lr is None else args.lr
-        args.select_lr = 1e-3 if args.select_lr is None else args.select_lr
+        args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
         args.batch_size = 8 if args.batch_size is None else args.batch_size
 
         train_set = imgDataset(fpath, num_cam, split='train', )
@@ -98,7 +98,7 @@ def main(args):
 
     if args.steps:
         args.lr /= 5
-        args.epochs *= 2
+        # args.epochs *= 2
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2 ** 32
@@ -114,7 +114,7 @@ def main(args):
     N = train_set.num_cam
 
     # logging
-    select_settings = f'steps{args.steps}_entropy{args.beta_entropy}_'
+    select_settings = f'steps{args.steps}_'
     lr_settings = f'base{args.base_lr_ratio}other{args.other_lr_ratio}' + \
                   f'select{args.select_lr}' if args.steps else ''
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
@@ -218,7 +218,7 @@ def main(args):
         # non-diagonal: step == 1
         val_loss_s, val_prec_s, val_oracle_s, _ = trainer.test_cam_combination(val_loader, 1)
         test_loss_s, test_prec_s, test_oracle_s, info_str[1] = trainer.test_cam_combination(test_loader, 1)
-        for i in range(2, max_steps):
+        for i in range(2, max_steps + 1):
             _, _, _, info_str[i] = trainer.test_cam_combination(test_loader, i)
         info_str = '\n'.join(info_str.values())
 
@@ -316,7 +316,7 @@ if __name__ == '__main__':
                         help='number of camera views to choose. if 0, then no selection')
     parser.add_argument('--gamma', type=float, default=0.99, help='reward discount factor (default: 0.99)')
     parser.add_argument('--down', type=int, default=1, help='down sample the image to 1/N size')
-    parser.add_argument('--beta_entropy', type=float, default=0.01)
+    # parser.add_argument('--beta_entropy', type=float, default=0.01)
     # multiview detection specific settings
     parser.add_argument('--eval_init_cam', type=str2bool, default=False,
                         help='only consider pedestrians covered by the initial camera')
