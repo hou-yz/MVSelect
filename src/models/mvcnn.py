@@ -13,7 +13,6 @@ from src.models.mvselect import CamSelect
 class MVCNN(MultiviewBase):
     def __init__(self, dataset, arch='resnet18', aggregation='max'):
         super().__init__(dataset, aggregation)
-
         if arch == 'resnet18':
             self.base = nn.Sequential(*list(models.resnet18(pretrained=True).children())[:-2])
             self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -32,7 +31,7 @@ class MVCNN(MultiviewBase):
         self.select_module = CamSelect(dataset.num_cam, base_dim, 1, aggregation)
         pass
 
-    def get_feat(self, imgs, M, down=1, visualize=False):
+    def get_feat(self, imgs, M=None, down=1, visualize=False):
         B, N, _, H, W = imgs.shape
         imgs = F.interpolate(imgs.flatten(0, 1), scale_factor=1 / down)
         imgs_feat = self.base(imgs)
@@ -51,23 +50,16 @@ if __name__ == '__main__':
     from thop import profile
     import itertools
 
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v2png_ori4', 20)
-    dataloader = DataLoader(dataset, 2, False, num_workers=0)
+    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
+    dataloader = DataLoader(dataset, 1, False, num_workers=0)
     imgs, tgt, keep_cams = next(iter(dataloader))
     model = MVCNN(dataset).cuda()
     init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
     keep_cams[0, 3] = 0
-    # model.train()
-    # res = model(imgs.cuda(), None, 2, init_prob, 3, keep_cams)
-    model.eval()
-    # res = model(imgs.cuda(), None, init_prob, override=5)
-    B, N, C, H, W = imgs.shape
-    candidates = np.eye(N)
-    combinations = np.array(list(itertools.combinations(candidates, 2))).sum(1)
-    with torch.no_grad():
-        cam_combination_results = model.forward_override_combination(imgs.cuda(), None, 1, combinations)
-    # macs, params = profile(model, inputs=(imgs[:, ],))
-    #
-    # print(f'{macs}')
-    # print(f'{params}')
+    model.train()
+    res = model(imgs.cuda(), None, 2, init_prob, 3, keep_cams)
+    # macs, params = profile(model, inputs=(imgs[:, :2].cuda(),))
+    # macs, params = profile(model.select_module, inputs=(torch.randn([1, 20, 512, 1, 1]).cuda(),
+    #                                                     F.one_hot(torch.tensor([1]), num_classes=20).cuda()))
+    # macs, params = profile(model, inputs=(torch.randn([1, 512, 1, 1]).cuda(),))
     pass

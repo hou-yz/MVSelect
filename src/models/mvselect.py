@@ -56,11 +56,11 @@ def softmax_to_hard(y_soft, dim=-1):
     return ret
 
 
-def aggregate_feat(feat, selection=None, aggregation='mean'):
+def aggregate_feat(feat, selection, aggregation='mean'):
     if selection is None:
         overall_feat = feat.mean(dim=1) if aggregation == 'mean' else feat.max(dim=1)[0]
     else:
-        selection = selection.bool()
+        selection = selection.bool().to(feat.device)
         overall_feat = feat * selection[:, :, None, None, None]
         if aggregation == 'mean':
             overall_feat = overall_feat.sum(dim=1) / (selection.sum(dim=1).view(-1, 1, 1, 1) + 1e-8)

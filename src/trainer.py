@@ -144,7 +144,7 @@ class PerspectiveTrainer(BaseTrainer):
                 loss, (action_sum, return_avg, value_loss) = \
                     self.expand_episode(feat, keep_cams, world_gt['heatmap'], eps_thres, (action_sum, return_avg))
             else:
-                overall_feat = aggregate_feat(feat, aggregation=self.model.aggregation)
+                overall_feat = aggregate_feat(feat, keep_cams, self.model.aggregation)
                 world_heatmap, world_offset = self.model.get_output(overall_feat)
                 loss_w_hm = focal_loss(world_heatmap, world_gt['heatmap'])
                 loss_w_off = regL1loss(world_offset, world_gt['reg_mask'], world_gt['idx'], world_gt['offset'])
@@ -283,7 +283,7 @@ class PerspectiveTrainer(BaseTrainer):
             # K, B, N
             with torch.no_grad():
                 (world_heatmap, world_offset), _ = \
-                    self.model.forward_override_combination(imgs.cuda(), affine_mats, self.args.down, combinations)
+                    self.model.forward_combination(imgs.cuda(), affine_mats, self.args.down, combinations, keep_cams)
 
             # decode
             xys = mvdet_decode(torch.sigmoid(world_heatmap.flatten(0, 1)), world_offset.flatten(0, 1),

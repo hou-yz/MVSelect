@@ -16,7 +16,11 @@ class MultiviewBase(nn.Module):
     def forward(self, imgs, M=None, down=1, init_prob=None, steps=0, keep_cams=None, visualize=False):
         feat, aux_res = self.get_feat(imgs, M, down, visualize)
         if self.select_module is None or init_prob is None or steps == 0:
-            overall_feat = aggregate_feat(feat, aggregation=self.aggregation)
+            B, N, C, H, W = feat.shape
+            if keep_cams is None:
+                keep_cams = torch.ones([B, N], dtype=torch.bool)
+            keep_cams = keep_cams.to(feat.device)
+            overall_feat = aggregate_feat(feat, keep_cams, aggregation=self.aggregation)
             selection_res = (None, None, None, None)
         else:
             overall_feat, selection_res = self.do_steps(feat, init_prob, steps, keep_cams)
@@ -43,14 +47,14 @@ class MultiviewBase(nn.Module):
     def get_output(self, overall_feat, visualize=False):
         raise NotImplementedError
 
-    def forward_override_combination(self, imgs, M, down, combinations):
+    def forward_combination(self, imgs, M, down, combinations, keep_cams):
         B, N, C, H, W = imgs.shape
         K, N = combinations.shape
 
         feat, aux_res = self.get_feat(imgs, M, down)
 
         # K, B, N
-        combinations = torch.tensor(combinations, dtype=torch.float, device=imgs.device).unsqueeze(1).repeat([1, B, 1])
+        combinations = torch.tensor(combinations).float().unsqueeze(1).repeat([1, B, 1]) * keep_cams[None, :]
 
         # K, B, N, C, H, W
         overall_feat_s = [aggregate_feat(feat, combinations[k], self.aggregation) for k in range(K)]

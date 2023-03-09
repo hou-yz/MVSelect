@@ -110,7 +110,7 @@ class MVDet(MultiviewBase):
         # Rworldgrid(xy)_from_Rimggrid(xy)
         # proj_mats = torch.diag(torch.tensor([1 / down, 1 / down, 1])).unsqueeze(0).repeat(B * N, 1, 1).float() @ \
         #             self.proj_mats.unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
-        proj_mats = self.proj_mats.unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
+        proj_mats = self.proj_mats[:N].unsqueeze(0).repeat(B, 1, 1, 1).flatten(0, 1) @ imgcoord_from_Rimggrid_mat
 
         if visualize:
             denorm = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
@@ -176,7 +176,8 @@ class MVDet(MultiviewBase):
         return world_heatmap, world_offset
 
 
-def test():
+
+if __name__ == '__main__':
     from src.datasets.frameDataset import frameDataset
     from src.datasets.Wildtrack import Wildtrack
     from src.datasets.MultiviewX import MultiviewX
@@ -185,8 +186,8 @@ def test():
     from src.utils.decode import ctdet_decode
     from thop import profile
 
-    dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), split='train', augmentation=True)
-    dataloader = DataLoader(dataset, 2, False, num_workers=0)
+    dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), split='train', augmentation=True)
+    dataloader = DataLoader(dataset, 1, False, num_workers=0)
 
     model = MVDet(dataset).cuda()
     imgs, world_gt, imgs_gt, affine_mats, frame, keep_cams = next(iter(dataloader))
@@ -194,20 +195,9 @@ def test():
     init_cam = 0
     model.train()
     (world_heatmap, world_offset), _, cam_train = model(imgs.cuda(), affine_mats, 2, init_cam, 3)
-    # xysc_train = ctdet_decode(world_heatmap, world_offset)
-    # model.eval()
-    # (world_heatmap, world_offset), _, cam_eval = model(imgs.cuda(), affine_mats, 2, init_cam, keep_cams, override=3)
-    # xysc_eval = ctdet_decode(world_heatmap, world_offset)
-    # init_prob = F.one_hot(torch.tensor([0, 1]), num_classes=dataset.num_cam)
-    # with torch.no_grad():
-    #     cam_combination_results = model.forward_override_combination(imgs.cuda(), affine_mats, 2, init_prob)
-    # macs, params = profile(model, inputs=(imgs[:, :2], affine_mats))
-    # macs, params = profile(model, inputs=(torch.rand(1, 6, 128, 160, 250), affine_mats))
-    #
-    # print(f'{macs}')
-    # print(f'{params}')
+    xysc_train = ctdet_decode(world_heatmap, world_offset)
+    # macs, params = profile(model, inputs=(imgs[:, :3].cuda(), affine_mats[:, :3].contiguous()))
+    # macs, params = profile(model.select_module, inputs=(torch.randn([1, 128, 160, 250]).cuda(),
+    #                                                     F.one_hot(torch.tensor([1]), num_classes=6).cuda()))
+    # macs, params = profile(model, inputs=(torch.rand([1, 128, 160, 250]).cuda(),))
     pass
-
-
-if __name__ == '__main__':
-    test()
