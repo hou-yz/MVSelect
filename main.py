@@ -1,8 +1,8 @@
 import os
-import time
-import itertools
 
 os.environ['OMP_NUM_THREADS'] = '1'
+import time
+import itertools
 import argparse
 import sys
 import shutil
@@ -120,7 +120,8 @@ def main(args):
     logdir = f'logs/{args.dataset}/{"DEBUG_" if is_debug else ""}{args.arch}_{args.aggregation}_down{args.down}_' \
              f'{select_settings if args.steps else ""}' \
              f'lr{args.lr}{lr_settings}_b{args.batch_size}_e{args.epochs}_dropcam{args.dropcam}_' \
-             f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}'
+             f'{datetime.datetime.today():%Y-%m-%d_%H-%M-%S}' if not args.eval \
+        else f'logs/{args.dataset}/EVAL_{args.resume}'
     os.makedirs(logdir, exist_ok=True)
     copy_tree('src', logdir + '/scripts/src')
     for script in os.listdir('.'):
@@ -152,6 +153,7 @@ def main(args):
         model.load_state_dict(model_dict)
 
     if args.resume:
+        print(f'loading checkpoint: logs/{args.dataset}/{args.resume}')
         pretrained_dict = torch.load(f'logs/{args.dataset}/{args.resume}/model.pth')
         model_dict = model.state_dict()
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
@@ -279,7 +281,7 @@ def main(args):
             with open(f'{logdir}/{fname}', 'r') as fp:
                 if i == 0:
                     print(fp.read())
-            if args.resume is None and i == 0:
+            if not args.eval and i == 0:
                 shutil.copyfile(f'{logdir}/{fname}', f'logs/{args.dataset}/{args.arch}_performance.txt')
 
     print('Test loaded model...')
@@ -287,6 +289,8 @@ def main(args):
     if args.steps == 0:
         log_best2cam_strategy(result_type)
     else:
+        if args.eval:
+            trainer.test(test_loader, torch.eye(N))
         trainer.test(test_loader)
 
 
