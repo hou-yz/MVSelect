@@ -51,6 +51,8 @@ class imgDataset(VisionDataset):
                 plt.show()
             imgs.append(self.transform(img))
         imgs = torch.stack(imgs)
+        # random_idx = np.random.randint(self.num_cam)
+        # imgs = imgs[torch.cat([torch.arange(random_idx, self.num_cam), torch.arange(0, random_idx)])]
         tgt = self.targets[idx]
         # dropout
         drop, keep_cams = np.random.rand() < self.dropout, torch.ones(self.num_cam, dtype=torch.bool)
@@ -59,6 +61,8 @@ class imgDataset(VisionDataset):
             drop_cams = np.random.choice(self.num_cam, num_drop, replace=False)
             for cam in drop_cams:
                 keep_cams[cam] = 0
+        # keep_cams = np.ones(self.num_cam, dtype=bool)
+        # keep_cams[[0, 2, 5, 6, 8, 11]] = 0
 
         return imgs, tgt, keep_cams
 
