@@ -50,7 +50,7 @@ if __name__ == '__main__':
     from thop import profile
     import itertools
 
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v1png', 12)
+    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
     dataloader = DataLoader(dataset, 1, False, num_workers=0)
     imgs, tgt, keep_cams = next(iter(dataloader))
     model = MVCNN(dataset).cuda()
@@ -59,7 +59,7 @@ if __name__ == '__main__':
     model.train()
     res = model(imgs.cuda(), None, 2, init_prob, 3, keep_cams)
     # macs, params = profile(model, inputs=(imgs[:, :2].cuda(),))
-    # macs, params = profile(model.select_module, inputs=(torch.randn([1, 12, 512, 1, 1]).cuda(),
+    # macs, params = profile(model.select_module, inputs=(torch.randn([1, 20, 512, 1, 1]).cuda(),
     #                                                     F.one_hot(torch.tensor([1]), num_classes=20).cuda()))
     # macs, params = profile(model, inputs=(torch.randn([1, 512, 1, 1]).cuda(),))
     pass

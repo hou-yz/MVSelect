@@ -54,7 +54,7 @@ def main(args):
     # dataset
     if 'modelnet' in args.dataset:
         if args.dataset == 'modelnet40_12':
-            fpath = os.path.expanduser('~/Data/modelnet/modelnet40v1png')
+            fpath = os.path.expanduser('~/Data/modelnet/modelnet40_images_new_12x')
             num_cam = 12
         elif args.dataset == 'modelnet40_20':
             fpath = os.path.expanduser('~/Data/modelnet/modelnet40v2png_ori4')
