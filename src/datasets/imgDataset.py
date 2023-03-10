@@ -68,6 +68,6 @@ class imgDataset(VisionDataset):
 
 
 if __name__ == '__main__':
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
+    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v1png', 12)
     dataset.__getitem__(0)
     dataset.__getitem__(len(dataset) - 1, visualize=True)
