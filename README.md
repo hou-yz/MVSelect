@@ -55,3 +55,6 @@ python main.py --step 2
 ``` 
 The default dataset is Wildtrack. For other datasets, please specify with the `-d` argument.
 
+
+## Pre-trained models
+You can download the checkpoints at this [link](https://anu365-my.sharepoint.com/:u:/g/personal/u6852178_anu_edu_au/EVFU-pk2swJAuaR29OeTBWABYLL-GzBVOJsvyFVxvbIGvQ).
