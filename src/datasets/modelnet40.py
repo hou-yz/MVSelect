@@ -9,7 +9,7 @@ import torchvision.transforms as T
 from torchvision.datasets import VisionDataset
 
 
-class imgDataset(VisionDataset):
+class ModelNet40(VisionDataset):
     classnames = ['airplane', 'bathtub', 'bed', 'bench', 'bookshelf', 'bottle', 'bowl', 'car', 'chair',
                   'cone', 'cup', 'curtain', 'desk', 'door', 'dresser', 'flower_pot', 'glass_box',
                   'guitar', 'keyboard', 'lamp', 'laptop', 'mantel', 'monitor', 'night_stand',
@@ -26,15 +26,17 @@ class imgDataset(VisionDataset):
 
         self.img_fpaths = {cam: [] for cam in range(self.num_cam)}
         self.targets = []
+        self.class_cnt = {cls: 0 for cls in self.classnames}
         for cls in self.classnames:
             for fname in sorted(glob.glob(f'{root}/{cls}/{split}/*.png')):
                 fname = os.path.basename(fname)
                 id, cam = map(int, re.findall(r'\d+', fname))
-                if id > (per_cls_instances if per_cls_instances else np.inf):
+                if self.class_cnt[cls] > (per_cls_instances if per_cls_instances else np.inf):
                     break
                 self.img_fpaths[cam - 1].append(f'{root}/{cls}/{split}/{fname}')
                 if cam == 1:
                     self.targets.append(self.classnames.index(cls))
+                    self.class_cnt[cls] += 1
         assert np.prod([len(i) == len(self.targets) for i in self.img_fpaths.values()]), \
             'plz ensure all models appear {num_cam} times!'
         print(f'{split}: {self.num_class} classes, {num_cam} views, {len(self.targets)} instances')
@@ -68,6 +70,6 @@ class imgDataset(VisionDataset):
 
 
 if __name__ == '__main__':
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
+    dataset = ModelNet40('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
     dataset.__getitem__(0)
     dataset.__getitem__(len(dataset) - 1, visualize=True)
