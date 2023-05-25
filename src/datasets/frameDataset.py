@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 def get_gt(Rshape, x_s, y_s, w_s=None, h_s=None, v_s=None, reduce=4, top_k=100, kernel_size=4):
     H, W = Rshape
     heatmap = np.zeros([1, H, W], dtype=np.float32)
-    reg_mask = np.zeros([top_k], dtype=np.bool)
+    reg_mask = np.zeros([top_k], dtype=bool)
     idx = np.zeros([top_k], dtype=np.int64)
     pid = np.zeros([top_k], dtype=np.int64)
     offset = np.zeros([top_k, 2], dtype=np.float32)
@@ -302,8 +302,8 @@ class frameDataset(VisionDataset):
 
 def test(test_projection=False):
     from torch.utils.data import DataLoader
-    from src.datasets.Wildtrack import Wildtrack
-    from src.datasets.MultiviewX import MultiviewX
+    from src.datasets.wildtrack import Wildtrack
+    from src.datasets.multiviewx import MultiviewX
 
     dataset = frameDataset(Wildtrack(os.path.expanduser('~/Data/Wildtrack')), force_download=True)
     dataset = frameDataset(MultiviewX(os.path.expanduser('~/Data/MultiviewX')), force_download=True)
