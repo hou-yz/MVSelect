@@ -45,12 +45,12 @@ class MVCNN(MultiviewBase):
 
 
 if __name__ == '__main__':
-    from src.datasets import imgDataset
+    from src.datasets import ModelNet40
     from torch.utils.data import DataLoader
     from thop import profile
     import itertools
 
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
+    dataset = ModelNet40('/home/houyz/Data/modelnet/modelnet40_images_new_12x', 12)
     dataloader = DataLoader(dataset, 1, False, num_workers=0)
     imgs, tgt, keep_cams = next(iter(dataloader))
     model = MVCNN(dataset).cuda()

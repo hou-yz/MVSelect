@@ -158,8 +158,8 @@ class MVDet(nn.Module):
 
 if __name__ == '__main__':
     from src.datasets.frameDataset import frameDataset
-    from src.datasets.Wildtrack import Wildtrack
-    from src.datasets.MultiviewX import MultiviewX
+    from src.datasets.wildtrack import Wildtrack
+    from src.datasets.multiviewx import MultiviewX
     import torchvision.transforms as T
     from torch.utils.data import DataLoader
     from src.utils.decode import ctdet_decode

@@ -76,14 +76,14 @@ class MVCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    from src.datasets import imgDataset
+    from src.datasets import ModelNet40
     from torch.utils.data import DataLoader
     from thop import profile
     import itertools
     import time
     import tqdm
 
-    dataset = imgDataset('/home/houyz/Data/modelnet/modelnet40v2png_ori4', 20)
+    dataset = ModelNet40('/home/houyz/Data/modelnet/modelnet40v2png_ori4', 20)
     dataloader = DataLoader(dataset, 8, num_workers=0)
     imgs, tgt, keep_cams = next(iter(dataloader))
 

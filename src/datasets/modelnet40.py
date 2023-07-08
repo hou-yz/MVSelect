@@ -26,17 +26,18 @@ class ModelNet40(VisionDataset):
 
         self.img_fpaths = {cam: [] for cam in range(self.num_cam)}
         self.targets = []
-        self.class_cnt = {cls: 0 for cls in self.classnames}
+        self.class_idx_dict = {cls: [] for cls in self.classnames}
         for cls in self.classnames:
             for fname in sorted(glob.glob(f'{root}/{cls}/{split}/*.png')):
                 fname = os.path.basename(fname)
                 id, cam = map(int, re.findall(r'\d+', fname))
-                if self.class_cnt[cls] > (per_cls_instances if per_cls_instances else np.inf):
+                if len(self.class_idx_dict[cls]) >= (per_cls_instances if per_cls_instances else np.inf) and \
+                        id not in self.class_idx_dict[cls]:
                     break
                 self.img_fpaths[cam - 1].append(f'{root}/{cls}/{split}/{fname}')
-                if cam == 1:
+                if id not in self.class_idx_dict[cls]:
                     self.targets.append(self.classnames.index(cls))
-                    self.class_cnt[cls] += 1
+                    self.class_idx_dict[cls].append(id)
         assert np.prod([len(i) == len(self.targets) for i in self.img_fpaths.values()]), \
             'plz ensure all models appear {num_cam} times!'
         print(f'{split}: {self.num_class} classes, {num_cam} views, {len(self.targets)} instances')
