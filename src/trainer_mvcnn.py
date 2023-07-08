@@ -22,7 +22,9 @@ class ClassifierTrainer(BaseTrainer):
     def task_loss_reward(self, overall_feat, tgt, step):
         output = self.model.get_output(overall_feat)
         task_loss = F.cross_entropy(output, tgt, reduction='none')
-        reward = torch.zeros_like(task_loss) if step < self.args.steps - 1 else (output.argmax(1) == tgt).float()
+        # reward = torch.zeros_like(task_loss) if step < self.args.steps - 1 else (output.argmax(1) == tgt).float()
+        reward = (self.last_loss - task_loss).detach()
+        self.last_loss = task_loss.detach()
         return task_loss, reward
 
     def train(self, epoch, dataloader, optimizer, scheduler=None, log_interval=200):
@@ -125,8 +127,9 @@ class ClassifierTrainer(BaseTrainer):
                   ('' if init_cam is not None else f', time: {time.time() - t0:.1f}s'))
 
         if init_cam is not None:
+            prec = correct / (correct + miss)
             print('*************************************')
-            print(f'MVSelect average prec {correct.sum() / (correct + miss).sum():.2%}, time: {time.time() - t0:.1f}')
+            print(f'MVSelect average prec {prec.mean()*100:.1f}±{prec.std()*100:.1f}%, time: {time.time() - t0:.1f}')
             print('*************************************')
         return losses.mean() / len(dataloader), [correct.sum() / (correct + miss).sum() * 100.0, ]
 
@@ -155,12 +158,12 @@ class ClassifierTrainer(BaseTrainer):
         instance_lvl_strategy = find_instance_lvl_strategy(tp_s, combinations)
         instance_lvl_oracle = np.take_along_axis(tp_s, instance_lvl_strategy, axis=0).mean(1).numpy()[:, None]
         # dataset level selection
-        keep_cam_idx = combinations[:, keep_cams[0].bool().numpy()].sum(1).astype(np.bool)
+        keep_cam_idx = combinations[:, keep_cams[0].bool().numpy()].sum(1).astype(bool)
         dataset_lvl_prec = tp_s.mean(1).numpy()[:, None]
         dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_prec, combinations)
         dataset_lvl_best_prec = dataset_lvl_prec[dataset_lvl_strategy]
-        oracle_info = f'{step} steps, averave acc {dataset_lvl_prec[keep_cam_idx].mean():.1%}, ' \
-                      f'dataset lvl best {dataset_lvl_best_prec.mean():.1%}, ' \
-                      f'instance lvl oracle {instance_lvl_oracle.mean():.1%}, time: {time.time() - t0:.1f}s'
+        oracle_info = f'{step} steps, averave acc {dataset_lvl_prec[keep_cam_idx].mean()*100:.1f}±{dataset_lvl_prec[keep_cam_idx].std()*100:.1f}%, ' \
+                      f'dataset lvl best {dataset_lvl_best_prec.mean()*100:.1f}±{dataset_lvl_best_prec.std()*100:.1f}%, ' \
+                      f'instance lvl oracle {instance_lvl_oracle.mean()*100:.1f}±{instance_lvl_oracle.std()*100:.1f}%, time: {time.time() - t0:.1f}s'
         print(oracle_info)
         return loss_s.mean(1).numpy(), dataset_lvl_prec * 100.0, instance_lvl_oracle * 100.0, oracle_info

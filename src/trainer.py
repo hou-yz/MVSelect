@@ -28,6 +28,7 @@ class BaseTrainer(object):
         self.denormalize = img_color_denormalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
     def rollout(self, step, state, tgt, eps_thres):
+        self.last_loss = 0
         feat, init_prob, keep_cams = state
         overall_feat, (log_prob, value, action, entropy) = \
             self.model.select_module(feat, init_prob, keep_cams, eps_thres)
@@ -104,7 +105,9 @@ class PerspectiveTrainer(BaseTrainer):
     def task_loss_reward(self, overall_feat, tgt, step):
         world_heatmap, world_offset = self.model.get_output(overall_feat)
         task_loss = focal_loss(world_heatmap, tgt, reduction='none')
-        reward = torch.zeros_like(task_loss).cuda() if step < self.args.steps - 1 else -task_loss.detach()
+        # reward = torch.zeros_like(task_loss).cuda() if step < self.args.steps - 1 else -task_loss.detach()
+        reward = (self.last_loss - task_loss).detach()
+        self.last_loss = task_loss.detach()
 
         # dataloader, frame = misc
         # modas = torch.zeros([B]).cuda()
@@ -262,8 +265,8 @@ class PerspectiveTrainer(BaseTrainer):
 
         if init_cam is not None:
             print('*************************************')
-            print(f'MVSelect average moda {modas.mean():.1f}%, modp {modps.mean():.1f}%, '
-                  f'prec {precs.mean():.1f}%, recall {recalls.mean():.1f}%, time: {time.time() - t0:.1f}')
+            print(f'MVSelect average moda {modas.mean():.1f}±{modas.std():.1f}%, modp {modps.mean():.1f}±{modps.std():.1f}%, '
+                  f'prec {precs.mean():.1f}±{precs.std():.1f}%, recall {recalls.mean():.1f}±{recalls.std():.1f}%, time: {time.time() - t0:.1f}')
             print('*************************************')
         return losses.mean() / len(dataloader), [modas.mean(), modps.mean(), precs.mean(), recalls.mean(), ]
 
@@ -329,9 +332,13 @@ class PerspectiveTrainer(BaseTrainer):
         instance_lvl_oracle = np.array(instance_lvl_oracle)
         dataset_lvl_strategy = find_dataset_lvl_strategy(dataset_lvl_metrics[:, 0], combinations)
         dataset_lvl_best_prec = dataset_lvl_metrics[dataset_lvl_strategy, 0]
-        oracle_info = f'{step} steps, averave moda {dataset_lvl_metrics[:, 0].mean():.1f}%, ' \
-                      f'dataset lvl best {dataset_lvl_best_prec.mean():.1f}%, ' \
-                      f'instance lvl oracle {instance_lvl_oracle.mean(0)[0]:.1f}%, time: {time.time() - t0:.1f}s'
+        area_strategy = find_area_strategy(dataloader.dataset.Rworld_coverage, combinations)
+        area_best_prec = dataset_lvl_metrics[area_strategy, 0]
+        oracle_info = f'{step} steps, averave moda {dataset_lvl_metrics[:, 0].mean():.1f}±{dataset_lvl_metrics[:, 0].std():.1f}%, ' \
+                      f'dataset lvl best {dataset_lvl_best_prec.mean():.1f}±{dataset_lvl_best_prec.std():.1f}%, ' \
+                      f'instance lvl oracle {instance_lvl_oracle.mean(0)[0]:.1f}±{instance_lvl_oracle.std(0)[0]:.1f}%, ' \
+                      f'cover area best {area_best_prec.mean():.1f}±{area_best_prec.std():.1f}%, ' \
+                      f'time: {time.time() - t0:.1f}s'
         print(oracle_info)
         return loss_s.mean(1), dataset_lvl_metrics, instance_lvl_oracle, oracle_info
 
@@ -354,5 +361,18 @@ def find_dataset_lvl_strategy(rewards, combinations):
     for init_cam in range(N):
         indices = np.nonzero(combinations[:, init_cam] == 1)[0]
         best_idx = np.argmax(rewards[indices])
+        strategy[init_cam] = indices[best_idx]
+    return strategy
+
+
+def find_area_strategy(coverage, combinations):
+    K, _, _, _ = coverage.shape
+    K, N = combinations.shape
+    mv_coverage = (torch.tensor(combinations)[:, :, None, None, None] *
+                   coverage[None]).max(dim=1)[0].mean(dim=[1, 2, 3])
+    strategy = np.zeros([N], dtype=int)
+    for init_cam in range(N):
+        indices = np.nonzero(combinations[:, init_cam] == 1)[0]
+        best_idx = np.argmax(mv_coverage[indices])
         strategy[init_cam] = indices[best_idx]
     return strategy
