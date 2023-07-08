@@ -68,9 +68,21 @@ def main(args):
         args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
         args.batch_size = 8 if args.batch_size is None else args.batch_size
 
-        train_set = imgDataset(fpath, num_cam, split='train', )
-        val_set = imgDataset(fpath, num_cam, split='train', per_cls_instances=25)
-        test_set = imgDataset(fpath, num_cam, split='test', )
+        train_set = ModelNet40(fpath, num_cam, split='train', )
+        val_set = ModelNet40(fpath, num_cam, split='train', per_cls_instances=25)
+        test_set = ModelNet40(fpath, num_cam, split='test', )
+    elif args.dataset=='scanobjectnn':
+        fpath = os.path.expanduser('~/Data/ScanObjectNN')
+
+        args.task = 'mvcnn'
+        result_type = ['prec']
+        args.lr = 5e-5 if args.lr is None else args.lr
+        args.select_lr = 1e-4 if args.select_lr is None else args.select_lr
+        args.batch_size = 8 if args.batch_size is None else args.batch_size
+
+        train_set = ScanObjectNN(fpath, split='train', )
+        val_set = ScanObjectNN(fpath, split='train', per_cls_instances=25)
+        test_set = ScanObjectNN(fpath, split='test', )
     else:
         if args.dataset == 'wildtrack':
             base = Wildtrack(os.path.expanduser('~/Data/Wildtrack'))
@@ -301,7 +313,7 @@ if __name__ == '__main__':
     parser.add_argument('--arch', type=str, default='resnet18')
     parser.add_argument('--aggregation', type=str, default='max', choices=['mean', 'max'])
     parser.add_argument('-d', '--dataset', type=str, default='wildtrack',
-                        choices=['wildtrack', 'multiviewx', 'modelnet40_12', 'modelnet40_20'])
+                        choices=['wildtrack', 'multiviewx', 'modelnet40_12', 'modelnet40_20', 'scanobjectnn'])
     parser.add_argument('-j', '--num_workers', type=int, default=4)
     parser.add_argument('-b', '--batch_size', type=int, default=None, help='input batch size for training')
     parser.add_argument('--dropcam', type=float, default=0.0)
