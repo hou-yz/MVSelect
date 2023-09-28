@@ -1,4 +1,4 @@
-# Learning to Select Camera Views: Efficient Multiview Understanding at Few Glances [[arXiv](https://arxiv.org/abs/2303.06145)]
+# Learning to Select Camera Views: Efficient Multiview Understanding at Few Glances # [[arXiv](https://arxiv.org/abs/2303.06145)]
 
 ## Overview
 We release code for **MVSelect**, a view selection module for efficient multiview understanding. Parallel to reducing the image resolution or using lighter network backbones, the proposed approach reduces the computational cost for multiview understanding by limiting the number of views considered. 
