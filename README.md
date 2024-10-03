@@ -57,4 +57,4 @@ The default dataset is Wildtrack. For other datasets, please specify with the `-
 
 
 ## Pre-trained models
-You can download the checkpoints at this [link](https://anu365-my.sharepoint.com/:u:/g/personal/u6852178_anu_edu_au/EVFU-pk2swJAuaR29OeTBWABYLL-GzBVOJsvyFVxvbIGvQ).
+You can download the checkpoints at this [link](https://1drv.ms/u/s!AtzsQybTubHfhNRCxKzkaOiLCKkIIA?e=fQxfhI).
